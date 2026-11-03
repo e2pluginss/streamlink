@@ -1,122 +1,78 @@
-# [Streamlink][streamlink-website]
+<h1 align="center"><a href="https://streamlink.github.io/">Streamlink<br><img height="150" alt="Streamlink" src="https://raw.githubusercontent.com/streamlink/streamlink/master/icon.svg"></a></h1>
 
-[![TravisCI build status][travisci-build-status-badge]][travisci-build-status]
-[![codecov.io][codecov-coverage-badge]][codecov-coverage] [![Backers on Open Collective][opencollective-backers-badge]](#backers) [![Sponsors on Open Collective][opencollective-sponsors-badge]](#sponsors)
+<p align="center">
+  <a href="https://streamlink.github.io/install.html"><img alt="Supported Python versions" src="https://img.shields.io/pypi/pyversions/streamlink.svg?style=flat-square&maxAge=86400"></a>
+  <a href="https://streamlink.github.io/changelog.html"><img alt="Latest release" src="https://img.shields.io/github/release/streamlink/streamlink.svg?style=flat-square&maxAge=86400"></a>
+  <a href="https://github.com/streamlink/streamlink"><img alt="License" src="https://img.shields.io/github/license/streamlink/streamlink.svg?style=flat-square&maxAge=86400"></a>
+  <a href="https://github.com/streamlink/streamlink/issues"><img alt="Open issues" src="https://img.shields.io/github/issues/streamlink/streamlink.svg?style=flat-square&maxAge=86400"></a>
+  <a href="https://github.com/streamlink/streamlink/actions?query=event%3Apush"><img alt="Build status" src="https://img.shields.io/github/actions/workflow/status/streamlink/streamlink/test.yml?branch=master&event=push&style=flat-square&maxAge=86400"></a>
+  <a href="https://codecov.io/github/streamlink/streamlink?branch=master"><img alt="Overall code coverage" src="https://img.shields.io/codecov/c/github/streamlink/streamlink.svg?branch=master&style=flat-square&maxAge=86400"></a>
+</p>
 
-Streamlink is a CLI utility that pipes flash videos from online streaming services to a variety of video players such as VLC, or alternatively, a browser.
+<p align="center">
+  A Python library and command-line interface which pipes streams from various services into a video player.<br>
+  Avoid resource-heavy and unoptimized websites, and still enjoy streamed content.
+</p>
 
-The main purpose of streamlink is to convert CPU-heavy flash plugins to a less CPU-intensive format.
-
-Streamlink is a fork of the [Livestreamer][livestreamer] project.
-
-Please note that by using this application you're bypassing ads run by
-sites such as Twitch.tv. Please consider donating or paying for subscription
-services when they are available for the content you consume and enjoy.
+<p align="center">
+  Streamlink was forked in 2016 from the abandoned <em>Livestreamer</em> project.
+</p>
 
 
-# [Installation][streamlink-installation]
+# 📦 Installation
 
-#### Installation via Python pip
-
-```bash
-sudo pip install streamlink
-```
-
-#### Manual installation via Python
-
-```bash
-git clone https://github.com/streamlink/streamlink
-cd streamlink
-sudo python setup.py install
-```
-
-#### Windows, MacOS, Linux and BSD specific installation methods
+Please take a look at the documentation for different ways of installing Streamlink:
 
 - [Windows][streamlink-installation-windows]
-- [Windows portable version][streamlink-installation-windows-portable]
-- [MacOS][streamlink-installation-others]
-- [Linux and BSD][streamlink-installation-linux]
+- [macOS][streamlink-installation-macos]
+- [Linux and BSD][streamlink-installation-linux-and-bsd]
+- [PyPI package and source code][streamlink-installation-pypi-source]
 
 
-# Features
+# 👍 Features
 
-Streamlink is built via a plugin system which allows new services to be easily added.
+Streamlink is built on top of a plugin system which allows support for new services to be added easily.  
+Most of the popular streaming services are supported, such as [Twitch](https://www.twitch.tv), [YouTube](https://www.youtube.com), and many more.
 
-Supported streaming services, among many others, are:
-
-- [Dailymotion](https://www.dailymotion.com)
-- [Livestream](https://livestream.com)
-- [Twitch](https://www.twitch.tv)
-- [UStream](http://www.ustream.tv)
-- [YouTube Live](https://www.youtube.com)
-
-A list of all supported plugins can be found on the [plugin page][streamlink-plugins].
+A list of all plugins currently included can be found on the [plugins page][streamlink-plugins].
 
 
-# Quickstart
+# 💡 Quickstart
 
-After installing, simply use:
+After installing, simply run:
 
-```
-streamlink STREAMURL best
+```sh
+streamlink "STREAMURL" best
 ```
 
-Streamlink will automatically open the stream in its default video player!
-See [Streamlink's detailed documentation][streamlink-documentation] for all available configuration options, CLI parameters and usage examples.
+The default behavior of Streamlink is to play back streams in the [VLC player][player-vlc], but a lot of other options and output methods are available, such as writing the stream to the filesystem, reading stream metadata, etc.
+
+For more in-depth usage, please refer to the [CLI documentation][streamlink-documentation-cli].
+
+An [API guide][streamlink-documentation-apiguide] and [API reference][streamlink-documentation-apiref] is available for Python implementors of Streamlink.
 
 
-# Contributing
+# 🙏 Contributing
 
 All contributions are welcome.
 Feel free to open a new thread on the issue tracker or submit a new pull request.
 Please read [CONTRIBUTING.md][contributing] first. Thanks!
 
-[![Contributors][opencollective-contributors]][contributors]
+
+# ❤️ Support
+
+If you think that Streamlink is useful and if you want to keep the project alive, then please consider supporting its maintainers by sending a small and optionally recurring tip via the [available options][support].  
+Your support is very much appreciated, thank you!
 
 
-## Backers
-
-Thank you to all our backers! \[[Become a backer][opencollective-backer]\]
-
-[![Backers on Open Collective][opencollective-backers-image]][opencollective-backers]
-
-
-## Sponsors
-
-Support this project by becoming a sponsor. Your logo will show up here with a link to your website. \[[Become a sponsor][opencollective-sponsor]\]
-
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/0/avatar.svg)](https://opencollective.com/streamlink/sponsor/0/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/1/avatar.svg)](https://opencollective.com/streamlink/sponsor/1/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/2/avatar.svg)](https://opencollective.com/streamlink/sponsor/2/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/3/avatar.svg)](https://opencollective.com/streamlink/sponsor/3/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/4/avatar.svg)](https://opencollective.com/streamlink/sponsor/4/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/5/avatar.svg)](https://opencollective.com/streamlink/sponsor/5/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/6/avatar.svg)](https://opencollective.com/streamlink/sponsor/6/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/7/avatar.svg)](https://opencollective.com/streamlink/sponsor/7/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/8/avatar.svg)](https://opencollective.com/streamlink/sponsor/8/website)
-[![Open Collective Streamlink Sponsor](https://opencollective.com/streamlink/sponsor/9/avatar.svg)](https://opencollective.com/streamlink/sponsor/9/website)
-
-
-  [streamlink-website]: https://streamlink.github.io
-  [streamlink-plugins]: https://streamlink.github.io/plugin_matrix.html
-  [streamlink-documentation]: https://streamlink.github.io/cli.html
-  [streamlink-installation]: https://streamlink.github.io/install.html
-  [streamlink-installation-windows]: https://streamlink.github.io/install.html#windows-binaries
-  [streamlink-installation-windows-portable]: https://streamlink.github.io/install.html#windows-portable-version
-  [streamlink-installation-linux]: https://streamlink.github.io/install.html#linux-and-bsd-packages
-  [streamlink-installation-others]: https://streamlink.github.io/install.html#other-platforms
-  [livestreamer]: https://github.com/chrippa/livestreamer
+  [streamlink-installation-windows]: https://streamlink.github.io/install.html#windows
+  [streamlink-installation-macos]: https://streamlink.github.io/install.html#macos
+  [streamlink-installation-linux-and-bsd]: https://streamlink.github.io/install.html#linux-and-bsd
+  [streamlink-installation-pypi-source]: https://streamlink.github.io/install.html#pypi-package-and-source-code
+  [streamlink-documentation-cli]: https://streamlink.github.io/cli.html
+  [streamlink-documentation-apiguide]: https://streamlink.github.io/api_guide.html
+  [streamlink-documentation-apiref]: https://streamlink.github.io/api.html
+  [streamlink-plugins]: https://streamlink.github.io/plugins.html
+  [player-vlc]: https://www.videolan.org/vlc/
   [contributing]: https://github.com/streamlink/streamlink/blob/master/CONTRIBUTING.md
-  [changelog]: https://github.com/streamlink/streamlink/blob/master/CHANGELOG.rst
-  [contributors]: https://github.com/streamlink/streamlink/graphs/contributors
-  [travisci-build-status]: https://travis-ci.org/streamlink/streamlink
-  [travisci-build-status-badge]: https://travis-ci.org/streamlink/streamlink.svg?branch=master
-  [codecov-coverage]: https://codecov.io/github/streamlink/streamlink?branch=master
-  [codecov-coverage-badge]: https://codecov.io/github/streamlink/streamlink/coverage.svg?branch=master
-  [opencollective-contributors]: https://opencollective.com/streamlink/contributors.svg?width=890
-  [opencollective-backer]: https://opencollective.com/streamlink#backer
-  [opencollective-backers]: https://opencollective.com/streamlink#backers
-  [opencollective-backers-image]: https://opencollective.com/streamlink/backers.svg?width=890
-  [opencollective-sponsor]: https://opencollective.com/streamlink#sponsor
-  [opencollective-backers-badge]: https://opencollective.com/streamlink/backers/badge.svg
-  [opencollective-sponsors-badge]: https://opencollective.com/streamlink/sponsors/badge.svg
+  [support]: https://streamlink.github.io/latest/support.html

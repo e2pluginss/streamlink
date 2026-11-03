@@ -13,20 +13,21 @@ Copyright 2015 Red Hat, Inc.
    See the License for the specific language governing permissions and
    limitations under the License.
 """
-from io import BytesIO
 
-import sys
-from requests.adapters import BaseAdapter
-from requests.compat import urlparse, unquote, urljoin
-from requests import Response, codes
 import errno
+import io
+import locale
 import os
 import os.path
 import stat
-import locale
-import io
+import sys
+from io import BytesIO
+from urllib.parse import unquote, urljoin, urlparse
 
-from streamlink.compat import is_win32, is_py3
+from requests import Response, codes
+from requests.adapters import BaseAdapter
+
+from streamlink.compat import is_win32
 
 
 class FileAdapter(BaseAdapter):
@@ -39,14 +40,14 @@ class FileAdapter(BaseAdapter):
 
         # Check that the method makes sense. Only support GET
         if request.method not in ("GET", "HEAD"):
-            raise ValueError("Invalid request method %s" % request.method)
+            raise ValueError(f"Invalid request method {request.method}")
 
         # Parse the URL
         url_parts = urlparse(request.url)
 
         # Make the Windows URLs slightly nicer
         if is_win32 and url_parts.netloc.endswith(":"):
-            url_parts = url_parts._replace(path="/" + url_parts.netloc + url_parts.path, netloc='')
+            url_parts = url_parts._replace(path=f"/{url_parts.netloc}{url_parts.path}", netloc="")
 
         # Reject URLs with a hostname component
         if url_parts.netloc and url_parts.netloc not in ("localhost", ".", "..", "-"):
@@ -57,7 +58,7 @@ class FileAdapter(BaseAdapter):
             pwd = os.path.abspath(url_parts.netloc).replace(os.sep, "/") + "/"
             if is_win32:
                 # prefix the path with a / in Windows
-                pwd = "/" + pwd
+                pwd = f"/{pwd}"
             url_parts = url_parts._replace(path=urljoin(pwd, url_parts.path.lstrip("/")))
 
         resp = Response()
@@ -69,10 +70,7 @@ class FileAdapter(BaseAdapter):
         try:
             # If the netloc is - then read from stdin
             if url_parts.netloc == "-":
-                if is_py3:
-                    resp.raw = sys.stdin.buffer
-                else:
-                    resp.raw = sys.stdin
+                resp.raw = sys.stdin.buffer
                 # make a fake response URL, the current directory
                 resp.url = "file://" + os.path.abspath(".").replace(os.sep, "/") + "/"
             else:
@@ -93,11 +91,10 @@ class FileAdapter(BaseAdapter):
                 # so that a directory separator can correctly be added to the real
                 # path, and remove any empty path parts between the drive and the path.
                 # Assume that a part ending with : or | (legacy) is a drive.
-                if path_parts and (path_parts[0].endswith('|') or
-                                   path_parts[0].endswith(':')):
+                if path_parts and (path_parts[0].endswith('|') or path_parts[0].endswith(':')):
                     path_drive = path_parts.pop(0)
                     if path_drive.endswith('|'):
-                        path_drive = path_drive[:-1] + ':'
+                        path_drive = f"{path_drive[:-1]}:"
 
                     while path_parts and not path_parts[0]:
                         path_parts.pop(0)

@@ -1,43 +1,79 @@
+"""
+$description German sports magazine live streams and VOD content, owned by ARD.
+$url sportschau.de
+$type live
+$metadata id
+$metadata title
+"""
+
 import re
-import json
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http
-from streamlink.stream import HDSStream
-
-_url_re = re.compile(r"http(s)?://(\w+\.)?sportschau.de/")
-_player_js = re.compile(r"https?://deviceids-medp.wdr.de/ondemand/.*\.js")
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.hls import HLSStream
+from streamlink.stream.http import HTTPStream
 
 
-class sportschau(Plugin):
-    @classmethod
-    def can_handle_url(cls, url):
-        return _url_re.match(url)
+log = getLogger(__name__)
+
+
+@pluginmatcher(re.compile(r"https?://(?:\w+\.)*sportschau\.de/"))
+class Sportschau(Plugin):
+    _schema_media = validate.Schema(
+        validate.parse_html(),
+        validate.xml_xpath_string(".//*[@data-v-type='MediaPlayer'][@data-v][1]/@data-v"),
+        validate.none_or_all(
+            validate.parse_json(),
+            {
+                "mc": {
+                    validate.optional("id"): str,
+                    "meta": {
+                        "title": str,
+                    },
+                    "streams": [
+                        validate.all(
+                            {
+                                "media": [
+                                    validate.all(
+                                        {
+                                            "mimeType": str,
+                                            "url": validate.url(),
+                                        },
+                                        validate.union_get(
+                                            "mimeType",
+                                            "url",
+                                        ),
+                                    ),
+                                ],
+                            },
+                            validate.get("media"),
+                        ),
+                    ],
+                },
+            },
+            validate.get("mc"),
+            validate.union_get(
+                "id",
+                ("meta", "title"),
+                "streams",
+            ),
+        ),
+    )
 
     def _get_streams(self):
-        res = http.get(self.url)
-        match = _player_js.search(res.text)
-        if match:
-            player_js = match.group(0)
-            self.logger.info("Found player js {0}", player_js)
-        else:
-            self.logger.info("Didn't find player js. Probably this page doesn't contain a video")
+        data = self.session.http.get(self.url, schema=self._schema_media)
+        if not data:
             return
 
-        res = http.get(player_js)
+        self.id, self.title, streams = data
 
-        jsonp_start = res.text.find('(') + 1
-        jsonp_end = res.text.rfind(')')
-
-        if jsonp_start <= 0 or jsonp_end <= 0:
-            self.logger.info("Couldn't extract json metadata from player.js: {0}", player_js)
-            return
-
-        json_s = res.text[jsonp_start:jsonp_end]
-
-        stream_metadata = json.loads(json_s)
-
-        return HDSStream.parse_manifest(self.session, stream_metadata['mediaResource']['dflt']['videoURL']).items()
+        for media in streams:
+            for mime_type, url in media:
+                if mime_type == "application/vnd.apple.mpegurl":
+                    yield from HLSStream.parse_variant_playlist(self.session, url).items()
+                elif mime_type.startswith("audio/"):
+                    yield "audio", HTTPStream(self.session, url)
 
 
-__plugin__ = sportschau
+__plugin__ = Sportschau

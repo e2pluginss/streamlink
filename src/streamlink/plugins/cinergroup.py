@@ -1,53 +1,92 @@
-from __future__ import print_function
+"""
+$description Turkish live TV channels from Ciner Group, including Haberturk TV and Show TV.
+$url bloomberght.com
+$url haberturk.com
+$url haberturk.tv
+$url showmax.com.tr
+$url showturk.com.tr
+$url showtv.com.tr
+$type live
+"""
 
-import json
 import re
+from urllib.parse import urljoin
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http
+from streamlink.plugin import Plugin, pluginmatcher
 from streamlink.plugin.api import validate
-from streamlink.stream import HLSStream
-from streamlink.compat import unquote
+from streamlink.stream.hls import HLSStream
 
 
+@pluginmatcher(
+    name="bloomberght",
+    pattern=re.compile(r"https?://(?:www\.)?bloomberght\.com/tv/?"),
+)
+@pluginmatcher(
+    name="haberturk",
+    pattern=re.compile(r"https?://(?:www\.)?haberturk\.(?:com|tv)(?:/tv)?/canliyayin/?"),
+)
+@pluginmatcher(
+    name="showmax",
+    pattern=re.compile(r"https?://(?:www\.)?showmax\.com\.tr/canli-?yayin/?"),
+)
+@pluginmatcher(
+    name="showturk",
+    pattern=re.compile(r"https?://(?:www\.)?showturk\.com\.tr/canli-?yayin(?:/showtv)?/?"),
+)
+@pluginmatcher(
+    name="showtv",
+    pattern=re.compile(r"https?://(?:www\.)?showtv\.com\.tr/canli-yayin(?:/showtv)?/?"),
+)
 class CinerGroup(Plugin):
-    """
-    Support for the live stream on www.showtv.com.tr
-    """
-    url_re = re.compile(r"""https?://(?:www.)?
-        (?:
-            showtv.com.tr/canli-yayin(/showtv)?|
-            haberturk.com/canliyayin|
-            showmax.com.tr/canliyayin|
-            showturk.com.tr/canli-yayin/showturk|
-            bloomberght.com/tv|
-            haberturk.tv/canliyayin
-        )/?""", re.VERBOSE)
-    stream_re = re.compile(r"""div .*? data-ht=(?P<quote>["'])(?P<data>.*?)(?P=quote)""", re.DOTALL)
-    stream_data_schema = validate.Schema(
-        validate.transform(stream_re.search),
-        validate.any(
-            None,
-            validate.all(
-                validate.get("data"),
-                validate.transform(unquote),
-                validate.transform(lambda x: x.replace("&quot;", '"')),
-                validate.transform(json.loads),
-                {
-                    "ht_stream_m3u8": validate.url()
-                },
-                validate.get("ht_stream_m3u8")
-            )
-        )
-    )
+    _re_bloomberght_hls = re.compile(r"""(?P<q>['"])(?P<url>https://[^'"]+/bloomberght/[^'"]+\.m3u8[^'"]*)(?P=q)""")
 
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls.url_re.match(url) is not None
+    @staticmethod
+    def _schema_videourl():
+        return validate.Schema(
+            validate.xml_xpath_string(".//script[contains(text(), 'videoUrl')]/text()"),
+            validate.none_or_all(
+                re.compile(r"""(?<!//)\s*var\s+videoUrl\s*=\s*(?P<q>['"])(?P<url>.+?)(?P=q)"""),
+                validate.none_or_all(
+                    validate.get("url"),
+                    validate.url(),
+                ),
+            ),
+        )
+
+    @staticmethod
+    def _schema_data_ht():
+        return validate.Schema(
+            validate.xml_xpath_string(".//div[@data-ht][1]/@data-ht"),
+            validate.none_or_all(
+                validate.parse_json(),
+                {
+                    "ht_stream_m3u8": validate.url(),
+                },
+                validate.get("ht_stream_m3u8"),
+            ),
+        )
+
+    def _get_bloomberght_stream_url(self):
+        # The live player script of the page has the stream URL built in
+        return self.session.http.get(
+            urljoin(self.url, "/build/common/live-stream.js"),
+            schema=validate.Schema(
+                self._re_bloomberght_hls,
+                validate.none_or_all(
+                    validate.get("url"),
+                    validate.url(),
+                ),
+            ),
+        )
 
     def _get_streams(self):
-        res = http.get(self.url)
-        stream_url = self.stream_data_schema.validate(res.text)
+        root = self.session.http.get(self.url, schema=validate.Schema(validate.parse_html()))
+        schema_getters = self._schema_videourl, self._schema_data_ht
+        stream_url = next((res for res in (getter().validate(root) for getter in schema_getters) if res), None)
+
+        if not stream_url and self.matches["bloomberght"]:
+            stream_url = self._get_bloomberght_stream_url()
+
         if stream_url:
             return HLSStream.parse_variant_playlist(self.session, stream_url)
 

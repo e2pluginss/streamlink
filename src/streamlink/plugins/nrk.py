@@ -1,64 +1,113 @@
+"""
+$description Live TV channels and video on-demand service from NRK, a Norwegian public, state-owned broadcaster.
+$url tv.nrk.no
+$url radio.nrk.no
+$type live, vod
+$region Norway
+"""
+
 import re
 
-from streamlink.compat import urljoin
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http, validate
-from streamlink.stream import HLSStream
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.hls import HLSStream
+from streamlink.stream.http import HTTPStream
 
-COOKIE_PARAMS = (
-    "devicetype=desktop&"
-    "preferred-player-odm=hlslink&"
-    "preferred-player-live=hlslink"
+
+log = getLogger(__name__)
+
+
+@pluginmatcher(
+    re.compile(r"https?://(?:tv|radio)\.nrk\.no/(program|direkte|serie|podkast)(?:/.+)?/([^/]+)"),
 )
-
-_id_re = re.compile(r"/(?:program|direkte|serie/[^/]+)/([^/]+)")
-_url_re = re.compile(r"https?://(tv|radio).nrk.no/")
-_api_baseurl_re = re.compile(r'''apiBaseUrl:\s*["'](?P<baseurl>[^"']+)["']''')
-
-_schema = validate.Schema(
-    validate.transform(_api_baseurl_re.search),
-    validate.any(
-        None,
-        validate.all(
-            validate.get("baseurl"),
-            validate.url(
-                scheme="http"
-            )
-        )
-    )
-)
-
-_mediaelement_schema = validate.Schema({
-    "mediaUrl": validate.url(
-        scheme="http",
-        path=validate.endswith(".m3u8")
-    )
-})
-
-
 class NRK(Plugin):
-    @classmethod
-    def can_handle_url(self, url):
-        return _url_re.match(url)
+    _URL_MANIFEST = "https://psapi.nrk.no/playback/manifest/{manifest_type}/{program_id}"
+    _URL_METADATA = "https://psapi.nrk.no/playback/metadata/{manifest_type}/{program_id}?eea-portability=true"
+
+    _MAP_MANIFEST_TYPE = {
+        "direkte": "channel",
+        "serie": "program",
+        "program": "program",
+        "podkast": "podcast",
+    }
+
+    def _get_metadata(self, manifest_type, program_id):
+        url_metadata = self._URL_METADATA.format(manifest_type=manifest_type, program_id=program_id)
+        non_playable = self.session.http.get(
+            url_metadata,
+            schema=validate.Schema(
+                validate.parse_json(),
+                {
+                    validate.optional("nonPlayable"): validate.none_or_all(
+                        {
+                            "reason": str,
+                            "endUserMessage": str,
+                        },
+                        validate.union_get("reason", "endUserMessage"),
+                    ),
+                },
+                validate.get("nonPlayable"),
+            ),
+        )
+        if non_playable:
+            reason, end_user_message = non_playable
+            log.error(f"Not playable: {reason} - {end_user_message or 'error'}")
+            return False
+
+        return True
+
+    def _update_program_id(self, program_id):
+        new_program_id = self.session.http.get(
+            self.url,
+            schema=validate.Schema(
+                validate.parse_html(),
+                validate.xml_xpath_string(".//meta[@property='nrk:program-id']/@content"),
+            ),
+        )
+        return new_program_id or program_id
+
+    def _get_assets(self, manifest_type, program_id):
+        return self.session.http.get(
+            self._URL_MANIFEST.format(manifest_type=manifest_type, program_id=program_id),
+            headers={"Accept": "application/vnd.nrk.psapi+json; version=9; player=tv-player; device=player-core"},
+            schema=validate.Schema(
+                validate.parse_json(),
+                {
+                    "playable": {
+                        "assets": [
+                            validate.all(
+                                {
+                                    "url": validate.url(),
+                                    "format": str,
+                                },
+                                validate.union_get("format", "url"),
+                            ),
+                        ],
+                    },
+                },
+                validate.get(("playable", "assets")),
+            ),
+        )
 
     def _get_streams(self):
-        # Get the stream type from the url (tv/radio).
-        stream_type = _url_re.match(self.url).group(1).upper()
-        cookie = {
-            "NRK_PLAYER_SETTINGS_{0}".format(stream_type): COOKIE_PARAMS
-        }
+        program_type, program_id = self.match.groups()
+        manifest_type = self._MAP_MANIFEST_TYPE.get(program_type)
+        if manifest_type is None:
+            log.error(f"Unknown program type '{program_type}'")
+            return
 
-        # Construct API URL for this program.
-        baseurl = http.get(self.url, cookies=cookie, schema=_schema)
-        program_id = _id_re.search(self.url).group(1)
+        program_id = self._update_program_id(program_id)
+        if self._get_metadata(manifest_type, program_id) is False:
+            return
 
-        # Extract media URL.
-        json_url = urljoin(baseurl, "mediaelement/{0}".format(program_id))
-        res = http.get(json_url, cookies=cookie)
-        media_element = http.json(res, schema=_mediaelement_schema)
-        media_url = media_element["mediaUrl"]
+        assets = self._get_assets(manifest_type, program_id)
 
-        return HLSStream.parse_variant_playlist(self.session, media_url)
+        # just return the first item
+        for stream_type, stream_url in assets:
+            if stream_type == "HLS":
+                return HLSStream.parse_variant_playlist(self.session, stream_url)
+            return [("live", HTTPStream(self.session, stream_url))]
 
 
 __plugin__ = NRK

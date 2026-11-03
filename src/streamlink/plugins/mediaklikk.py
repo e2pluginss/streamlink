@@ -1,41 +1,100 @@
+"""
+$description Live TV channels from MTVA, a Hungarian public, state-owned broadcaster.
+$url mediaklikk.hu
+$url m4sport.hu
+$url hirado.hu
+$type live
+$region Hungary
+"""
+
 import re
+from urllib.parse import unquote, urlparse
 
-from streamlink.plugin import Plugin
-from streamlink.stream import HLSStream
-from streamlink.plugin.api import http
-
-
-_stream_url_re = re.compile(r"http(s)?://(www\.)?mediaklikk.hu/([A-Za-z0-9\-]+)/?")
-_id_re = re.compile(r'.*data\-streamid="([a-z0-9]+)".*')
-_file_re = re.compile(r'.*{\'file\': ?\'([a-zA-Z0-9\./\?=:]+)\'}].*')
-
-_stream_player_url = "http://player.mediaklikk.hu/player/player-inside-full3.php?userid=mtva&streamid={0}&flashmajor=21&flashminor=0"
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.hls import HLSStream
+from streamlink.utils.url import update_scheme
 
 
+log = getLogger(__name__)
+
+
+@pluginmatcher(
+    re.compile(r"https?://(?:www\.)?(?:mediaklikk|m4sport|hirado)\.hu/"),
+)
 class Mediaklikk(Plugin):
-    @classmethod
-    def can_handle_url(cls, url):
-        return _stream_url_re.match(url)
+    PLAYER_URL = "https://player.mediaklikk.hu/playernew/player.php"
 
-    def _get_playlist_url(self):
-        # get the id
-        content = http.get(self.url)
-        match = _id_re.match(content.text.replace("\n", ""))
-        if not match:
+    def _get_streams(self):
+        params = self.session.http.get(
+            self.url,
+            schema=validate.Schema(
+                re.compile(
+                    r"""
+                        loadPlayer\s*\(\s*
+                            (?P<q>['"]).+?(?P=q)\s*,\s*
+                            (?P<json>{.*?})\s*
+                        \)
+                    """,
+                    re.VERBOSE | re.DOTALL,
+                ),
+                validate.none_or_all(
+                    validate.get("json"),
+                    validate.parse_json(),
+                    {
+                        "contentId": validate.any(str, int),
+                        validate.optional("streamId"): str,
+                        validate.optional("idec"): str,
+                        validate.optional("token"): str,
+                    },
+                ),
+            ),
+        )
+        if not params:
+            log.error("Could not find player data")
             return
 
-        # get the m3u8 file url
-        player_url = _stream_player_url.format(match.group(1))
-        content = http.get(player_url)
+        params.update({
+            "video": (
+                unquote(params.pop("token"))
+                if params.get("token") is not None
+                else params.pop("streamId")
+            ),
+            "noflash": "yes",
+            "embedded": "0",
+        })  # fmt: skip
 
-        match = _file_re.match(content.text.replace("\n", ""))
-        if match:
-            return match.group(1)
+        url_parsed = urlparse(self.url)
+        skip_vods = url_parsed.netloc.endswith("m4sport.hu") and url_parsed.path.startswith("/elo")
 
-    @Plugin.broken()
-    def _get_streams(self):
-        playlist = self._get_playlist_url()
-        return HLSStream.parse_variant_playlist(self.session, playlist)
+        self.session.http.headers.update({"Referer": self.url})
+        playlists = self.session.http.get(
+            self.PLAYER_URL,
+            params=params,
+            schema=validate.Schema(
+                re.compile(r"pl\.setup\s*\(\s*(?P<json>{.*?})\s*\)\s*;", re.DOTALL),
+                validate.none_or_all(
+                    validate.get("json"),
+                    validate.parse_json(),
+                    {
+                        "playlist": [
+                            {
+                                "file": validate.url(),
+                                "type": str,
+                            },
+                        ],
+                    },
+                    validate.get("playlist"),
+                    validate.filter(lambda p: p["type"] == "hls"),
+                    validate.filter(lambda p: not skip_vods or "vod" not in p["file"]),
+                    validate.map(lambda p: update_scheme("https://", p["file"])),
+                ),
+            ),
+        )
+
+        for url in playlists or []:
+            yield from HLSStream.parse_variant_playlist(self.session, url).items()
 
 
 __plugin__ = Mediaklikk

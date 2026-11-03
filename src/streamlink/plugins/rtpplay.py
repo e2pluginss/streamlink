@@ -1,41 +1,76 @@
+"""
+$description Live TV channels and video on-demand service from RTP, a Portuguese public, state-owned broadcaster.
+$url rtp.pt/play
+$type live, vod
+$region Portugal
+"""
+
 import re
+from base64 import b64decode
+from urllib.parse import unquote
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http, useragents
-from streamlink.stream import HLSStream
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import useragents, validate
+from streamlink.stream.hls import HLSStream
 
 
+@pluginmatcher(
+    re.compile(r"https?://www\.rtp\.pt/play/"),
+)
 class RTPPlay(Plugin):
-    _url_re = re.compile(r"https?:\/\/www.rtp.pt\/play\/")
-    _m3u8_re = re.compile(r"file:(?:\s+)?(?:\'|\")(?P<url>[^\"']+)(?:\'|\")")
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return RTPPlay._url_re.match(url)
-
     def _get_streams(self):
+        self.session.http.headers.update({
+            "User-Agent": useragents.CHROME,
+            "Referer": self.url,
+        })
 
-        headers = {
-            "User-Agent": useragents.CHROME
-        }
+        re_m3u8 = re.compile(
+            r"""
+                hls\s*:\s*(?:
+                    (?P<q>["'])(?P<string>.*?)(?P=q)
+                    |
+                    decodeURIComponent\s*\((?P<obfuscated>\[.*?])\.join\(
+                    |
+                    atob\s*\(\s*decodeURIComponent\s*\((?P<obfuscated_b64>\[.*?])\.join\(
+                )
+            """,
+            re.VERBOSE,
+        )
 
-        res = http.get(self.url, headers=headers)
-
-        url_match = RTPPlay._m3u8_re.search(res.text)
-
-        if url_match:
-            hls_url = url_match.group("url")
-
-            self.logger.debug("Found URL: {0}".format(hls_url))
-
-            try:
-                s = []
-                for s in HLSStream.parse_variant_playlist(self.session, hls_url).items():
-                    yield s
-                if not s:
-                    yield "live", HLSStream(self.session, hls_url)
-            except IOError as err:
-                self.logger.error("Failed to extract streams: {0}", err)
+        hls_url = self.session.http.get(
+            self.url,
+            schema=validate.Schema(
+                validate.transform(lambda text: next(reversed(list(re_m3u8.finditer(text))), None)),
+                validate.any(
+                    None,
+                    validate.all(
+                        validate.get("string"),
+                        str,
+                        validate.any(
+                            "",
+                            validate.url(),
+                        ),
+                    ),
+                    validate.all(
+                        validate.get("obfuscated"),
+                        str,
+                        validate.parse_json(),
+                        validate.transform(lambda arr: unquote("".join(arr))),
+                        validate.url(),
+                    ),
+                    validate.all(
+                        validate.get("obfuscated_b64"),
+                        str,
+                        validate.parse_json(),
+                        validate.transform(lambda arr: unquote("".join(arr))),
+                        validate.transform(lambda b64: b64decode(b64).decode("utf-8")),
+                        validate.url(),
+                    ),
+                ),
+            ),
+        )
+        if hls_url:
+            return HLSStream.parse_variant_playlist(self.session, hls_url)
 
 
 __plugin__ = RTPPlay

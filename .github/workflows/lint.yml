@@ -1,0 +1,92 @@
+name: Lint
+
+on:
+  pull_request: {}
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+jobs:
+  repo-integrity:
+    name: Repo integrity
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 300
+      - name: Fetch base branch ref
+        run: |
+          git fetch origin --depth=300 "+${{ github.base_ref }}:refs/remotes/origin/${{ github.base_ref }}"
+      - name: File permissions
+        if: ${{ !cancelled() }}
+        run: "! grep -Ev '^644' <(git ls-files src/ tests/ | xargs stat '--format=%a %n')"
+      - name: File encodings
+        if: ${{ !cancelled() }}
+        run: "! grep -E -e 'UTF-[^8]' -e 'UTF-[^ ]+ \\(with BOM\\)' <(git ls-files src/ tests/ | xargs stat '--format=%a %n')"
+      - name: Line terminators
+        if: ${{ !cancelled() }}
+        run: "! grep 'with CRLF line terminators' <(git ls-files | file -nNf-)"
+      - name: No bidirectional Unicode control characters
+        if: ${{ !cancelled() }}
+        run: '! git grep -PIn "[\x{061C}\x{200E}\x{200F}\x{202A}-\x{202E}\x{2066}-\x{2069}]"'
+      - name: No invisible zero-width Unicode control characters
+        if: ${{ !cancelled() }}
+        run: '! git grep -PIn "[\x{00AD}\x{034F}\x{200B}-\x{200D}\x{2060}-\x{2064}\x{FEFF}]"'
+      - name: Linear git history
+        if: ${{ !cancelled() }}
+        run: |
+          git log -z --format="%H%n%s" --min-parents=2 "origin/${{ github.base_ref }}..HEAD" \
+            | awk -v RS='\0' -F'\n' \
+              -f .github/workflows/scripts/lint-git-common.awk \
+              -f .github/workflows/scripts/lint-git-linear-history.awk
+      - name: Git commit messages
+        if: ${{ !cancelled() }}
+        run: |
+          git log -z --format="%H%n%B" "origin/${{ github.base_ref }}..HEAD" \
+            | awk -v RS='\0' -F'\n' \
+              -f .github/workflows/scripts/lint-git-common.awk \
+              -f .github/workflows/scripts/lint-git-commit-msg-format.awk
+
+  style:
+    name: Code style
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          prune-cache: true
+      - name: ruff check
+        if: ${{ !cancelled() }}
+        run: uv run --frozen --group lint ruff check .
+      - name: ruff format
+        if: ${{ !cancelled() }}
+        run: uv run --frozen --group lint ruff format --diff .
+
+  typing:
+    name: Typing
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.14"
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          prune-cache: true
+      - name: ty
+        if: ${{ !cancelled() }}
+        run: uv run --frozen --group typing ty check
+      - name: mypy
+        if: ${{ !cancelled() }}
+        run: uv run --frozen --group typing mypy --no-incremental
+      - name: mypy docs
+        if: ${{ !cancelled() }}
+        run: uv run --frozen --group typing mypy --python-version=3.12 --no-incremental docs

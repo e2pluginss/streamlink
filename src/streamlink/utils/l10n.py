@@ -1,23 +1,21 @@
+from __future__ import annotations
+
 import locale
+from warnings import catch_warnings
 
-from streamlink.compat import is_py2
+from pycountry import countries, languages
 
-try:
-    from iso639 import languages
-    from iso3166 import countries
+from streamlink.logger import getLogger
 
-    PYCOUNTRY = False
-except ImportError:  # pragma: no cover
-    from pycountry import languages, countries
-
-    PYCOUNTRY = True
 
 DEFAULT_LANGUAGE = "en"
 DEFAULT_COUNTRY = "US"
-DEFAULT_LANGUAGE_CODE = "{0}_{1}".format(DEFAULT_LANGUAGE, DEFAULT_COUNTRY)
+DEFAULT_LANGUAGE_CODE = f"{DEFAULT_LANGUAGE}_{DEFAULT_COUNTRY}"
+
+log = getLogger(__name__)
 
 
-class Country(object):
+class Country:
     def __init__(self, alpha2, alpha3, numeric, name, official_name=None):
         self.alpha2 = alpha2
         self.alpha3 = alpha3
@@ -28,35 +26,38 @@ class Country(object):
     @classmethod
     def get(cls, country):
         try:
-            if PYCOUNTRY:
-                c = countries.lookup(country)
-                return Country(c.alpha_2, c.alpha_3, c.numeric, c.name, getattr(c, "official_name", c.name))
-            else:
-                c = countries.get(country)
-                return Country(c.alpha2, c.alpha3, c.numeric, c.name, c.apolitical_name)
-        except (LookupError, KeyError):
-            raise LookupError("Invalid country code: {0}".format(country))
+            c = countries.lookup(country)
+
+            # changed in pycountry 23.12.11: a UserWarning is emitted when the official_name is missing
+            with catch_warnings(record=True):
+                official_name = getattr(c, "official_name", c.name)
+
+            return Country(
+                c.alpha_2,
+                c.alpha_3,
+                c.numeric,
+                c.name,
+                official_name=official_name,
+            )
+        except LookupError as err:
+            raise LookupError(f"Invalid country code: {country}") from err
+
+    def __hash__(self):
+        return hash((self.alpha2, self.alpha3, self.numeric, self.name, self.official_name))
 
     def __eq__(self, other):
-        return ((self.alpha2 and self.alpha2 == other.alpha2) or
-                (self.alpha3 and self.alpha3 == other.alpha3) or
-                (self.numeric and self.numeric == other.numeric))
+        return (
+            (self.alpha2 and self.alpha2 == other.alpha2)
+            or (self.alpha3 and self.alpha3 == other.alpha3)
+            or (self.numeric and self.numeric == other.numeric)
+        )
 
     def __str__(self):
-        if is_py2:
-            return self.__unicode__().encode("utf8")
-        else:
-            return self.__unicode__()
-
-    def __unicode__(self):
-        return u"Country({0!r}, {1!r}, {2!r}, {3!r}, official_name={4!r})".format(self.alpha2,
-                                                                                  self.alpha3,
-                                                                                  self.numeric,
-                                                                                  self.name,
-                                                                                  self.official_name)
+        alpha2, alpha3, numeric, name, official_name = self.alpha2, self.alpha3, self.numeric, self.name, self.official_name
+        return f"Country({alpha2!r}, {alpha3!r}, {numeric!r}, {name!r}, {official_name=!r})"
 
 
-class Language(object):
+class Language:
     def __init__(self, alpha2, alpha3, name, bibliographic=None):
         self.alpha2 = alpha2
         self.alpha3 = alpha3
@@ -66,98 +67,105 @@ class Language(object):
     @classmethod
     def get(cls, language):
         try:
-            if PYCOUNTRY:
-                c = languages.lookup(language)
-                return Language(c.alpha_2, c.alpha_3, c.name, getattr(c, "bibliographic", None))
-            else:
-                l = None
-                if len(language) == 2:
-                    l = languages.get(alpha2=language)
-                elif len(language) == 3:
-                    for code_type in ['part2b', 'part2t', 'part3']:
-                        try:
-                            l = languages.get(**{code_type: language})
-                            break
-                        except KeyError:
-                            pass
-                    if not l:
-                        raise KeyError(language)
-                else:
-                    raise KeyError(language)
-                return Language(l.alpha2, l.part3, l.name, l.part2b or l.part2t)
-        except (LookupError, KeyError):
-            raise LookupError("Invalid language code: {0}".format(language))
+            lang = (
+                languages.get(alpha_2=language)
+                or languages.get(alpha_3=language)
+                or languages.get(bibliographic=language)
+                or languages.get(name=language)
+            )
+            if not lang:
+                raise KeyError(language)
+            return Language(
+                # some languages don't have an alpha_2 code
+                getattr(lang, "alpha_2", ""),
+                lang.alpha_3,
+                lang.name,
+                getattr(lang, "bibliographic", ""),
+            )
+        except LookupError as err:
+            raise LookupError(f"Invalid language code: {language}") from err
+
+    def __hash__(self):
+        return hash((self.alpha2, self.alpha3, self.name, self.bibliographic))
 
     def __eq__(self, other):
-        return ((self.alpha2 and self.alpha2 == other.alpha2) or
-                (self.alpha3 and self.alpha3 == other.alpha3) or
-                (self.bibliographic and self.bibliographic == other.bibliographic))
+        return (
+            (self.alpha2 and self.alpha2 == other.alpha2)
+            or (self.alpha3 and self.alpha3 == other.alpha3)
+            or (self.bibliographic and self.bibliographic == other.bibliographic)
+        )
 
     def __str__(self):
-        if is_py2:
-            return self.__unicode__().encode("utf8")
-        else:
-            return self.__unicode__()
-
-    def __unicode__(self):
-        return u"Language({0!r}, {1!r}, {2!r}, bibliographic={3!r})".format(self.alpha2,
-                                                                            self.alpha3,
-                                                                            self.name,
-                                                                            self.bibliographic)
+        alpha2, alpha3, name, bibliographic = self.alpha2, self.alpha3, self.name, self.bibliographic
+        return f"Language({alpha2!r}, {alpha3!r}, {name!r}, {bibliographic=!r})"
 
 
-class Localization(object):
+class Localization:
     def __init__(self, language_code=None):
         self._language_code = None
         self.country = None
         self.language = None
         self.explicit = bool(language_code)
-        self.language_code = language_code
+        self._set_language_code(language_code)
 
     @property
     def language_code(self):
         return self._language_code
 
+    @language_code.setter
+    def language_code(self, language_code):
+        self._set_language_code(language_code)
+
     def _parse_locale_code(self, language_code):
         parts = language_code.split("_", 1)
         if len(parts) != 2 or len(parts[0]) != 2 or len(parts[1]) != 2:
-            raise LookupError("Invalid language code: {0}".format(language_code))
+            raise LookupError(f"Invalid language code: {language_code}")
         return self.get_language(parts[0]), self.get_country(parts[1])
 
-    @language_code.setter
-    def language_code(self, language_code):
+    def _set_language_code(self, language_code):
         is_system_locale = language_code is None
-        if language_code is None:
+        if is_system_locale:
             try:
-                language_code, _ = locale.getdefaultlocale()
+                language_code, _ = locale.getlocale()
             except ValueError:
                 language_code = None
             if language_code is None or language_code == "C":
                 # cannot be determined
-                language_code = DEFAULT_LANGUAGE
+                language_code = DEFAULT_LANGUAGE_CODE
 
         try:
             self.language, self.country = self._parse_locale_code(language_code)
             self._language_code = language_code
         except LookupError:
-            if is_system_locale:
-                # If the system locale returns an invalid code, use the default
-                self.language = self.get_language(DEFAULT_LANGUAGE)
-                self.country = self.get_country(DEFAULT_COUNTRY)
-                self._language_code = DEFAULT_LANGUAGE_CODE
-            else:
+            if not is_system_locale:
                 raise
+            # If the system locale returns an invalid code, use the default
+            self.language = self.get_language(DEFAULT_LANGUAGE)
+            self.country = self.get_country(DEFAULT_COUNTRY)
+            self._language_code = DEFAULT_LANGUAGE_CODE
+        log.debug(f"Language code: {self._language_code}")
 
-    def equivalent(self, language=None, country=None):
-        equivalent = True
+    def equivalent(
+        self,
+        language: Language | str | None = None,
+        country: Country | str | None = None,
+    ) -> bool:
         try:
-            equivalent = equivalent and (not language or self.language == self.get_language(language))
-            equivalent = equivalent and (not country or self.country == self.get_country(country))
+            return (
+                (
+                    not language
+                    or isinstance(language, Language) and self.language == language
+                    or self.language == self.get_language(language)
+                )
+                and (
+                    not country
+                    or isinstance(country, Country) and self.country == country
+                    or self.country == self.get_country(country)
+                )
+            )  # fmt: skip
         except LookupError:
-            # if an unknown language/country code is given they cannot equivalent
+            # if an unknown language/country code is given, they cannot be equivalent
             return False
-
-        return equivalent
 
     @classmethod
     def get_country(cls, country):

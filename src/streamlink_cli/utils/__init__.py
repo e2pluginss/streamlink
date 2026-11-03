@@ -1,33 +1,31 @@
+# ruff: file-ignore[non-empty-init-module]
+
 import json
+from datetime import datetime as _datetime
 
-from contextlib import contextmanager
-
-from .http_server import HTTPServer
-from streamlink.utils.named_pipe import NamedPipe
-from .progress import progress
-from .player import find_default_player
-from .stream import stream_to_url
+from streamlink_cli.utils.formatter import Formatter
+from streamlink_cli.utils.player import find_default_player
 
 
 __all__ = [
-    "NamedPipe", "HTTPServer", "JSONEncoder",
-    "find_default_player", "ignored", "progress", "stream_to_url"
+    "Formatter",
+    "JSONEncoder",
+    "datetime",
+    "find_default_player",
 ]
 
 
 class JSONEncoder(json.JSONEncoder):
-    def default(self, obj):
-        if hasattr(obj, "__json__"):
-            return obj.__json__()
-        elif isinstance(obj, bytes):
-            return obj.decode("utf8", "ignore")
+    def default(self, o):
+        if hasattr(o, "__json__"):
+            return o.__json__()
+        elif isinstance(o, bytes):
+            return o.decode("utf8", "ignore")
         else:
-            return json.JSONEncoder.default(self, obj)
+            return json.JSONEncoder.default(self, o)
 
 
-@contextmanager
-def ignored(*exceptions):
-    try:
-        yield
-    except exceptions:
-        pass
+# noinspection PyPep8Naming
+class datetime(_datetime):
+    def __str__(self):
+        return self.strftime("%Y-%m-%d_%H-%M-%S")

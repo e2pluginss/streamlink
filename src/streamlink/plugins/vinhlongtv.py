@@ -1,45 +1,73 @@
-import logging
+"""
+$description Vietnamese live TV channels from THVL, including THVL1, THVL2, THVL3 and THVL4.
+$url thvli.vn
+$type live
+$metadata id
+$metadata title
+$region Vietnam
+"""
+
 import re
+from datetime import datetime, timezone
+from hashlib import md5
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http, useragents, validate
-from streamlink.stream import HLSStream
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.hls import HLSStream
 
-log = logging.getLogger(__name__)
+
+log = getLogger(__name__)
 
 
+@pluginmatcher(
+    re.compile(r"https?://(?:www\.)?thvli\.vn/live/(?P<channel>[^/]+)"),
+)
 class VinhLongTV(Plugin):
+    _API_URL = "https://api.thvli.vn/backend/cm/get_detail/{channel}/"
+    _API_KEY_DATE = "Kh0ngDuLieu"
+    _API_KEY_TIME = "C0R0i"
+    _API_KEY_SECRET = "Kh0aAnT0an"
 
-    api_url = 'http://api.thvli.vn/backend/cm/detail/{0}/'
+    def _get_headers(self):
+        now = datetime.now(tz=timezone.utc)
+        date = now.strftime("%Y%m%d")
+        time = now.strftime("%H%M%S")
+        dtstr = f"{date}{time}"
+        dthash = md5(dtstr.encode()).hexdigest()
+        key_value = f"{dthash[:3]}{dthash[-3:]}"
+        key_access = f"{self._API_KEY_DATE}{date}{self._API_KEY_TIME}{time}{self._API_KEY_SECRET}{key_value}"
 
-    _url_re = re.compile(
-        r'https?://(?:www\.)?thvli\.vn/live/(?P<channel>[^/]+)')
-
-    _data_schema = validate.Schema(
-        {
-            'link_play': validate.text,
-        },
-        validate.get('link_play')
-    )
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls._url_re.match(url) is not None
+        return {
+            "X-SFD-Date": dtstr,
+            "X-SFD-Key": md5(key_access.encode()).hexdigest(),
+        }
 
     def _get_streams(self):
-        http.headers.update({'User-Agent': useragents.FIREFOX})
+        channel = self.match.group("channel")
+        params = {"timezone": "UTC"}
+        headers = self._get_headers()
 
-        channel = self._url_re.match(self.url).group('channel')
+        self.id, self.title, hls_url = self.session.http.get(
+            self._API_URL.format(channel=channel),
+            params=params,
+            headers=headers,
+            schema=validate.Schema(
+                validate.parse_json(),
+                {
+                    "id": str,
+                    "title": str,
+                    "link_play": str,
+                },
+                validate.union_get(
+                    "id",
+                    "title",
+                    "link_play",
+                ),
+            ),
+        )
 
-        res = http.get(self.api_url.format(channel))
-        hls_url = http.json(res, schema=self._data_schema)
-        log.debug('URL={0}'.format(hls_url))
-
-        streams = HLSStream.parse_variant_playlist(self.session, hls_url)
-        if not streams:
-            return {'live': HLSStream(self.session, hls_url)}
-        else:
-            return streams
+        return HLSStream.parse_variant_playlist(self.session, hls_url)
 
 
 __plugin__ = VinhLongTV

@@ -1,176 +1,218 @@
-import base64
+"""
+$description Live TV channels and video on-demand service from RTVE, a Spanish public, state-owned broadcaster.
+$url rtve.es
+$type live, vod
+$metadata id
+$region Spain
+"""
+
+from __future__ import annotations
+
 import re
-from functools import partial
+from base64 import b64decode
+from io import BytesIO
+from typing import TYPE_CHECKING
+from urllib.parse import urlparse
 
-from Crypto.Cipher import Blowfish
-
-from streamlink import PluginError
-from streamlink.compat import bytes, is_py3
-from streamlink.plugin import Plugin, PluginArguments, PluginArgument
-from streamlink.plugin.api import http
-from streamlink.plugin.api import useragents
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, PluginError, pluginmatcher
 from streamlink.plugin.api import validate
-from streamlink.stream import HLSStream
-from streamlink.stream import HTTPStream
 from streamlink.stream.ffmpegmux import MuxedStream
-from streamlink.utils import parse_xml
+from streamlink.stream.hls import HLSStream
+from streamlink.stream.http import HTTPStream
+from streamlink.utils.url import update_scheme
 
 
-class ZTNRClient(object):
-    base_url = "http://ztnr.rtve.es/ztnr/res/"
-    block_size = 16
+if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
 
-    def __init__(self, key):
-        self.cipher = Blowfish.new(key, Blowfish.MODE_ECB)
 
-    @classmethod
-    def pad(cls, data):
-        n = cls.block_size - len(data) % cls.block_size
-        return data + bytes(chr(cls.block_size - len(data) % cls.block_size), "utf8") * n
+log = getLogger(__name__)
+
+
+class Base64Reader:
+    def __init__(self, data: str):
+        stream = BytesIO(b64decode(data))
+
+        def _iterate():
+            while True:
+                chunk = stream.read(1)
+                if len(chunk) == 0:
+                    return
+                yield ord(chunk)
+
+        self._iterator: Iterator[int] = _iterate()
+
+    def read(self, num: int) -> Sequence[int]:
+        res = []
+        for _ in range(num):
+            item = next(self._iterator, None)
+            if item is None:
+                break
+            res.append(item)
+        return res
+
+    def skip(self, num: int) -> None:
+        self.read(num)
+
+    def read_chars(self, num: int) -> str:
+        return "".join(chr(item) for item in self.read(num))
+
+    def read_int(self) -> int:
+        a, b, c, d = self.read(4)
+        return a << 24 | b << 16 | c << 8 | d
+
+    def read_chunk(self) -> tuple[str, Sequence[int]]:
+        size = self.read_int()
+        chunktype = self.read_chars(4)
+        chunkdata = self.read(size)
+        if len(chunkdata) != size:  # pragma: no cover
+            raise ValueError("Invalid chunk length")
+        self.skip(4)
+        return chunktype, chunkdata
+
+    def __iter__(self):
+        self.skip(8)
+        while True:
+            try:
+                yield self.read_chunk()
+            except ValueError:
+                return
+
+
+class ZTNR:
+    @staticmethod
+    def _get_alphabet(text: str) -> str:
+        res = []
+        j = 0
+        k = 0
+        for char in text:
+            if k > 0:
+                k -= 1
+            else:
+                res.append(char)
+                j = (j + 1) % 4
+                k = j
+        return "".join(res)
 
     @staticmethod
-    def unpad(data):
-        if is_py3:
-            return data[0:-data[-1]]
-        else:
-            return data[0:-ord(data[-1])]
-
-    def encrypt(self, data):
-        return base64.b64encode(self.cipher.encrypt(self.pad(bytes(data, "utf-8"))), altchars=b"-_").decode("ascii")
-
-    def decrypt(self, data):
-        return self.unpad(self.cipher.decrypt(base64.b64decode(data, altchars=b"-_")))
-
-    def request(self, data, *args, **kwargs):
-        res = http.get(self.base_url + self.encrypt(data), *args, **kwargs)
-        return self.decrypt(res.content)
-
-    def get_cdn_list(self, vid, manager="apedemak", vtype="video", lang="es", schema=None):
-        data = self.request("{id}_{manager}_{type}_{lang}".format(id=vid, manager=manager, type=vtype, lang=lang))
-        if schema:
-            return schema.validate(data)
-        else:
-            return data
-
-
-class Rtve(Plugin):
-    secret_key = base64.b64decode("eWVMJmRhRDM=")
-    content_id_re = re.compile(r'data-id\s*=\s*"(\d+)"')
-    url_re = re.compile(r"""
-        https?://(?:www\.)?rtve\.es/(?:directo|noticias|television|deportes|alacarta|drmn)/.*?/?
-    """, re.VERBOSE)
-    cdn_schema = validate.Schema(
-        validate.transform(partial(parse_xml, invalid_char_entities=True)),
-        validate.xml_findall(".//preset"),
-        [
-            validate.union({
-                "quality": validate.all(validate.getattr("attrib"),
-                                        validate.get("type")),
-                "urls": validate.all(
-                    validate.xml_findall(".//url"),
-                    [validate.getattr("text")]
-                )
-            })
-        ]
-    )
-    subtitles_api = "http://www.rtve.es/api/videos/{id}/subtitulos.json"
-    subtitles_schema = validate.Schema({
-        "page": {
-            "items": [{
-                "src": validate.url(),
-                "lang": validate.text
-            }]
-        }
-    },
-        validate.get("page"),
-        validate.get("items"))
-    video_api = "http://www.rtve.es/api/videos/{id}.json"
-    video_schema = validate.Schema({
-        "page": {
-            "items": [{
-                "qualities": [{
-                    "preset": validate.text,
-                    "height": int
-                }]
-            }]
-        }
-    },
-        validate.get("page"),
-        validate.get("items"),
-        validate.get(0))
-    arguments = PluginArguments(
-        PluginArgument(
-            "mux-subtitles",
-            action="store_true",
-            help="""
-        Automatically mux available subtitles in to the output stream.
-        """
-        )
-    )
+    def _get_url(text: str, alphabet: str) -> str:
+        res = []
+        j = 0
+        n = 0
+        k = 3
+        cont = 0
+        for char in text:
+            if j == 0:
+                n = int(char) * 10
+                j = 1
+            elif k > 0:
+                k -= 1
+            else:
+                res.append(alphabet[n + int(char)])
+                j = 0
+                k = cont % 4
+                cont += 1
+        return "".join(res)
 
     @classmethod
-    def can_handle_url(cls, url):
-        return cls.url_re.match(url) is not None
+    def _get_source(cls, alphabet: str, data: str) -> str:
+        return cls._get_url(data, cls._get_alphabet(alphabet))
 
-    def __init__(self, url):
-        Plugin.__init__(self, url)
-        self.zclient = ZTNRClient(self.secret_key)
-        http.headers = {"User-Agent": useragents.SAFARI_8}
+    @classmethod
+    def translate(cls, data: str) -> Iterator[tuple[str, str]]:
+        reader = Base64Reader(data.replace("\n", ""))
+        for chunk_type, chunk_data in reader:
+            if chunk_type == "IEND":
+                break
+            if chunk_type == "tEXt":
+                content = "".join(chr(item) for item in chunk_data if item > 0)
+                if "#" not in content or "%%" not in content:
+                    continue
+                alphabet, content = content.split("#", 1)
+                quality, content = content.split("%%", 1)
+                yield quality, cls._get_source(alphabet, content)
 
-    def _get_content_id(self):
-        res = http.get(self.url)
-        m = self.content_id_re.search(res.text)
-        return m and int(m.group(1))
 
-    def _get_subtitles(self, content_id):
-        res = http.get(self.subtitles_api.format(id=content_id))
-        return http.json(res, schema=self.subtitles_schema)
-
-    def _get_quality_map(self, content_id):
-        res = http.get(self.video_api.format(id=content_id))
-        data = http.json(res, schema=self.video_schema)
-        qmap = {}
-        for item in data["qualities"]:
-            qname = {"MED": "Media", "HIGH": "Alta", "ORIGINAL": "Original"}.get(item["preset"], item["preset"])
-            qmap[qname] = u"{0}p".format(item["height"])
-        return qmap
+@pluginmatcher(
+    re.compile(r"https?://(?:www\.)?rtve\.es/play/videos/.+"),
+)
+class Rtve(Plugin):
+    URL_M3U8 = "https://ztnr.rtve.es/ztnr/{id}.m3u8"
+    URL_VIDEOS = "https://ztnr.rtve.es/ztnr/movil/thumbnail/rtveplayw/videos/{id}.png?q=v2"
+    URL_SUBTITLES = "https://www.rtve.es/api/videos/{id}/subtitulos.json"
 
     def _get_streams(self):
-        streams = []
-        content_id = self._get_content_id()
-        if content_id:
-            self.logger.debug("Found content with id: {0}", content_id)
-            stream_data = self.zclient.get_cdn_list(content_id, schema=self.cdn_schema)
-            quality_map = None
+        self.id = self.session.http.get(
+            self.url,
+            schema=validate.Schema(
+                validate.parse_html(),
+                validate.xml_xpath_string(".//*[contains(@class,'videoPlayer')][@data-setup][1]/@data-setup"),
+                validate.none_or_all(
+                    validate.parse_json(),
+                    {
+                        "idAsset": validate.any(int, validate.all(str, validate.transform(int))),
+                    },
+                    validate.get("idAsset"),
+                ),
+            ),
+        )
+        if not self.id:
+            return
 
-            for stream in stream_data:
-                for url in stream["urls"]:
-                    if ".m3u8" in url:
-                        try:
-                            streams.extend(HLSStream.parse_variant_playlist(self.session, url).items())
-                        except (IOError, OSError):
-                            self.logger.debug("Failed to load m3u8 url: {0}", url)
-                    elif ((url.endswith("mp4") or url.endswith("mov") or url.endswith("avi")) and
-                                  http.head(url, raise_for_status=False).status_code == 200):
-                        if quality_map is None:  # only make the request when it is necessary
-                            quality_map = self._get_quality_map(content_id)
-                        # rename the HTTP sources to match the HLS sources
-                        quality = quality_map.get(stream["quality"], stream["quality"])
-                        streams.append((quality, HTTPStream(self.session, url)))
+        # check obfuscated stream URLs via self.URL_VIDEOS and ZTNR.translate() first
+        # self.URL_M3U8 appears to be valid for all streams, but doesn't provide any content in some cases
+        try:
+            urls = self.session.http.get(
+                self.URL_VIDEOS.format(id=self.id),
+                schema=validate.Schema(
+                    validate.transform(ZTNR.translate),
+                    validate.transform(list),
+                    [(str, validate.url())],
+                    validate.length(1),
+                ),
+            )
+        except PluginError:
+            # catch HTTP errors and validation errors, and fall back to generic HLS URL template
+            url = self.URL_M3U8.format(id=self.id)
+        else:
+            url = next((url for _, url in urls if urlparse(url).path.endswith(".m3u8")), None)
+            if not url:
+                url = next((url for _, url in urls if urlparse(url).path.endswith(".mp4")), None)
+                if url:
+                    yield "vod", HTTPStream(self.session, url)
+                return
 
-            subtitles = None
-            if self.get_option("mux_subtitles"):
-                subtitles = self._get_subtitles(content_id)
-            if subtitles:
-                substreams = {}
-                for i, subtitle in enumerate(subtitles):
-                    substreams[subtitle["lang"]] = HTTPStream(self.session, subtitle["src"])
+        streams = HLSStream.parse_variant_playlist(self.session, url).items()
 
-                for q, s in streams:
-                    yield q, MuxedStream(self.session, s, subtitles=substreams)
-            else:
-                for s in streams:
-                    yield s
+        if self.session.get_option("mux-subtitles"):
+            subs = self.session.http.get(
+                self.URL_SUBTITLES.format(id=self.id),
+                schema=validate.Schema(
+                    validate.parse_json(),
+                    {
+                        "page": {
+                            "items": [
+                                {
+                                    "lang": str,
+                                    "src": validate.url(),
+                                },
+                            ],
+                        },
+                    },
+                    validate.get(("page", "items")),
+                ),
+            )
+            if subs:
+                subtitles = {
+                    s["lang"]: HTTPStream(self.session, update_scheme("https://", s["src"], force=True))
+                    for s in subs
+                }  # fmt: skip
+                for quality, stream in streams:
+                    yield quality, MuxedStream(self.session, stream, subtitles=subtitles)
+                return
+
+        yield from streams
 
 
 __plugin__ = Rtve

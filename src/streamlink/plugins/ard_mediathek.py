@@ -1,124 +1,140 @@
+"""
+$description Live TV channels and video on-demand service from ARD, a German public, independent broadcaster.
+$url ardmediathek.de
+$url mediathek.daserste.de
+$type live, vod
+$metadata id
+$metadata author
+$metadata title
+$region Germany
+"""
+
 import re
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http, validate
-from streamlink.stream import HDSStream, HLSStream, HTTPStream
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.hls import HLSStream
+from streamlink.stream.http import HTTPStream
 
-MEDIA_URL = "http://www.ardmediathek.de/play/media/{0}"
-SWF_URL = "http://www.ardmediathek.de/ard/static/player/base/flash/PluginFlash.swf"
-HDCORE_PARAMETER = "?hdcore=3.3.0"
-QUALITY_MAP = {
-    "auto": "auto",
-    3: "544p",
-    2: "360p",
-    1: "288p",
-    0: "144p"
-}
 
-_url_re = re.compile(r"http(s)?://(?:(\w+\.)?ardmediathek.de/tv|mediathek.daserste.de/)")
-_media_id_re = re.compile(r"/play/(?:media|config)/(\d+)")
-_media_schema = validate.Schema({
-    "_mediaArray": [{
-        "_mediaStreamArray": [{
-            validate.optional("_server"): validate.text,
-            "_stream": validate.any(validate.text, [validate.text]),
-            "_quality": validate.any(int, validate.text)
-        }]
-    }]
-})
-_smil_schema = validate.Schema(
-    validate.union({
-        "base": validate.all(
-            validate.xml_find("head/meta"),
-            validate.get("base"),
-            validate.url(scheme="http")
-        ),
-        "cdn": validate.all(
-            validate.xml_find("head/meta"),
-            validate.get("cdn")
-        ),
-        "videos": validate.all(
-            validate.xml_findall("body/seq/video"),
-            [validate.get("src")]
-        )
-    })
+log = getLogger(__name__)
+
+
+@pluginmatcher(
+    name="live",
+    pattern=re.compile(r"https?://(\w+\.)?ardmediathek\.de/live(?:/(?:[^/]+/)?(?P<id_live>\w+))?(?:\?|$)"),
 )
+@pluginmatcher(
+    name="video",
+    pattern=re.compile(r"https?://(\w+\.)?ardmediathek\.de/video/(?:[^/]+/[^/]+/[^/]+/)?(?P<id_video>\w+)(?:\?|$)"),
+)
+class ARDMediathek(Plugin):
+    _URL_API = "https://api.ardmediathek.de/page-gateway/pages/ard/item/{item}"
+    _URL_NOW = "https://programm-api.ard.de/nownext/api/now"
 
-
-class ard_mediathek(Plugin):
-    @classmethod
-    def can_handle_url(cls, url):
-        return _url_re.match(url)
-
-    def _get_http_streams(self, info):
-        name = QUALITY_MAP.get(info["_quality"], "vod")
-        urls = info["_stream"]
-        if not isinstance(info["_stream"], list):
-            urls = [urls]
-
-        for url in urls:
-            stream = HTTPStream(self.session, url)
-            yield name, stream
-
-    def _get_hds_streams(self, info):
-        # Needs the hdcore parameter added
-        url = info["_stream"] + HDCORE_PARAMETER
-        return HDSStream.parse_manifest(self.session, url, pvswf=SWF_URL).items()
-
-    def _get_hls_streams(self, info):
-        return HLSStream.parse_variant_playlist(self.session, info["_stream"]).items()
-
-    def _get_smil_streams(self, info):
-        res = http.get(info["_stream"])
-        smil = http.xml(res, "SMIL config", schema=_smil_schema)
-
-        for video in smil["videos"]:
-            url = "{0}/{1}{2}".format(smil["base"], video, HDCORE_PARAMETER)
-            streams = HDSStream.parse_manifest(self.session, url, pvswf=SWF_URL, is_akamai=smil["cdn"] == "akamai")
-
-            for stream in streams.items():
-                yield stream
+    _SCHEMA_DATA = validate.Schema(
+        validate.parse_json(),
+        {
+            "id": str,
+            "widgets": validate.all(
+                [dict],
+                validate.filter(lambda item: item.get("mediaCollection")),
+                validate.get(0),
+                validate.none_or_all(
+                    {
+                        "geoblocked": bool,
+                        "publicationService": {
+                            "name": str,
+                        },
+                        "show": validate.none_or_all(
+                            {"title": str},
+                            validate.get("title"),
+                        ),
+                        "title": str,
+                        "mediaCollection": {
+                            "embedded": {
+                                "streams": [
+                                    validate.all(
+                                        {
+                                            "media": [
+                                                {
+                                                    "mimeType": str,
+                                                    "url": validate.url(),
+                                                    "maxVResolutionPx": int,
+                                                },
+                                            ],
+                                        },
+                                        validate.get("media"),
+                                    ),
+                                ],
+                            },
+                        },
+                    },
+                    validate.union_get(
+                        "geoblocked",
+                        ("mediaCollection", "embedded", "streams"),
+                        ("publicationService", "name"),
+                        "title",
+                        "show",
+                    ),
+                ),
+            ),
+        },
+    )
 
     def _get_streams(self):
-        res = http.get(self.url)
-        match = _media_id_re.search(res.text)
-        if match:
-            media_id = match.group(1)
-        else:
+        self.id = media_id = self.match["id_live"] if self.matches["live"] else self.match["id_video"]
+
+        if self.matches["live"] and not media_id:
+            media_id = self.session.http.get(
+                self._URL_NOW,
+                schema=validate.Schema(
+                    validate.parse_json(),
+                    {"channels": {str: dict}},
+                    validate.get("channels"),
+                    validate.transform(dict.keys),
+                    validate.transform(list),
+                    validate.get(0),
+                ),
+            )
+
+        data = self.session.http.get(
+            self._URL_API.format(item=media_id),
+            params={
+                "devicetype": "pc",
+                "embedded": "false",
+            },
+            schema=self._SCHEMA_DATA,
+        )
+        if not data:
             return
 
-        self.logger.debug("Found media id: {0}", media_id)
+        if not data["widgets"]:
+            log.info("The content is unavailable")
+            return
 
-        res = http.get(MEDIA_URL.format(media_id))
-        media = http.json(res, schema=_media_schema)
+        geoblocked, streams, self.author, self.title, show = data["widgets"]
+        if geoblocked:
+            log.info("The content is not available in your region")
+            return
 
-        for media in media["_mediaArray"]:
-            for stream in media["_mediaStreamArray"]:
-                stream_ = stream["_stream"]
-                if isinstance(stream_, list):
-                    if not stream_:
-                        continue
-                    stream_ = stream_[0]
+        if show:
+            show = show.strip()
+            if not self.title:
+                self.title = show
+            elif show != self.title:
+                self.title = f"{show}: {self.title}"
 
-                if stream_.endswith(".f4m"):
-                    parser = self._get_hds_streams
-                    parser_name = "HDS"
-                elif stream_.endswith(".smil"):
-                    parser = self._get_smil_streams
-                    parser_name = "SMIL"
-                elif stream_.endswith(".m3u8"):
-                    parser = self._get_hls_streams
-                    parser_name = "HLS"
-                elif stream_.startswith("http"):
-                    parser = self._get_http_streams
-                    parser_name = "HTTP"
-
-                try:
-                    for s in parser(stream):
-                        yield s
-                except IOError as err:
-                    self.logger.error("Failed to extract {0} streams: {1}",
-                                      parser_name, err)
+        result = []
+        for stream in streams:
+            for media in stream:
+                match media["mimeType"]:
+                    case "application/vnd.apple.mpegurl":
+                        return HLSStream.parse_variant_playlist(self.session, media["url"])
+                    case "video/mp4":
+                        result.append((f"{media['maxVResolutionPx']}p", HTTPStream(self.session, media["url"])))
+        return result
 
 
-__plugin__ = ard_mediathek
+__plugin__ = ARDMediathek

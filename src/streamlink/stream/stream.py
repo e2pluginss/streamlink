@@ -1,47 +1,71 @@
+from __future__ import annotations
+
 import io
 import json
-import logging
+from typing import TYPE_CHECKING
 
-log = logging.getLogger(__name__)
+from streamlink.logger import getLogger
 
 
-class Stream(object):
-    __shortname__ = "stream"
+if TYPE_CHECKING:
+    from streamlink.session import Streamlink
 
+
+log = getLogger(__name__)
+
+
+class Stream:
     """
     This is a base class that should be inherited when implementing
     different stream types. Should only be created by plugins.
     """
 
-    def __init__(self, session):
-        self.session = session
+    __shortname__ = "stream"
+
+    @classmethod
+    def shortname(cls):
+        return cls.__shortname__
+
+    def __init__(self, session: Streamlink):
+        """
+        :param session: Streamlink session instance
+        """
+
+        self.session: Streamlink = session
 
     def __repr__(self):
-        return "<Stream()>"
+        params = [repr(self.shortname())]
+        for method in self.to_url, self.to_manifest_url:
+            try:
+                params.append(repr(method()))
+            except TypeError:
+                pass
 
-    def __json__(self):
-        return dict(type=type(self).shortname())
+        return f"<{self.__class__.__name__} [{', '.join(params)}]>"
 
-    def open(self):
-        """
-        Attempts to open a connection to the stream.
-        Returns a file-like object that can be used to read the stream data.
-
-        Raises :exc:`StreamError` on failure.
-        """
-        raise NotImplementedError
+    def __json__(self):  # ruff: ignore[bad-dunder-method-name]
+        return dict(type=self.shortname())
 
     @property
     def json(self):
         obj = self.__json__()
         return json.dumps(obj)
 
-    @classmethod
-    def shortname(cls):
-        return cls.__shortname__
-
     def to_url(self):
-        raise TypeError("{0} cannot be converted to a URL".format(self.shortname()))
+        raise TypeError(f"<{self.__class__.__name__} [{self.shortname()}]> cannot be translated to a URL")
+
+    def to_manifest_url(self):
+        raise TypeError(f"<{self.__class__.__name__} [{self.shortname()}]> cannot be translated to a manifest URL")
+
+    def open(self) -> StreamIO:
+        """
+        Attempts to open a connection to the stream.
+        Returns a file-like object that can be used to read the stream data.
+
+        :raises StreamError: on failure
+        """
+
+        raise NotImplementedError
 
 
 class StreamIO(io.IOBase):

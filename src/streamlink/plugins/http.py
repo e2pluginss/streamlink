@@ -1,25 +1,32 @@
 import re
+from urllib.parse import urlparse
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.plugin import parse_url_params
-from streamlink.stream import HTTPStream
-from streamlink.utils import update_scheme
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.plugin import parse_params
+from streamlink.stream.http import HTTPStream
+from streamlink.utils.url import update_scheme
 
 
+log = getLogger(__name__)
+
+
+@pluginmatcher(
+    re.compile(r"httpstream://(?P<url>\S+)(?:\s(?P<params>.+))?$"),
+)
 class HTTPStreamPlugin(Plugin):
-    _url_re = re.compile(r"httpstream://(.+)")
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls._url_re.match(url) is not None
-
     def _get_streams(self):
-        url, params = parse_url_params(self.url)
-        urlnoproto = self._url_re.match(url).group(1)
-        urlnoproto = update_scheme("http://", urlnoproto)
+        data = self.match.groupdict()
+        url = update_scheme("https://", data.get("url", ""), force=False)
+        params = parse_params(data.get("params"))
+        log.debug("URL=%s; params=%r", url, params)
 
-        self.logger.debug("URL={0}; params={1}", urlnoproto, params)
-        return {"live": HTTPStream(self.session, urlnoproto, **params)}
+        parsed = urlparse(url)
+        if parsed.scheme != "file" and not parsed.netloc:
+            log.error("Input URL is missing a host or input file path is missing the file:// scheme")
+            return
+
+        return {"live": HTTPStream(self.session, url, **params)}
 
 
 __plugin__ = HTTPStreamPlugin

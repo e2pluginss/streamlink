@@ -1,0 +1,39 @@
+#!/usr/bin/env bash
+set -euxo pipefail
+
+PY=$(python -c 'import platform,sysconfig;v="".join(platform.python_version_tuple()[:2]);t="t" if sysconfig.get_config_var("Py_GIL_DISABLED") else "";print(f"cp{v}-cp{v}{t}")')
+[[ "${PY}" == cp314-cp314t || "${PY}" == cp315-cp315 ]] || exit 0
+
+if [[ "$(uname)" == Linux ]]; then
+    PLATFORM=linux_x86_64
+elif [[ "$(uname)" == Darwin ]]; then
+    PLATFORM=macosx_10_15_universal2
+elif [[ "$(uname)" == MINGW64_NT* ]]; then
+    PLATFORM=win_amd64
+else
+    exit 1
+fi
+
+
+BASE=https://github.com/streamlink/temp-dependency-builds-DO-NOT-USE/releases/download
+DEPS=()
+
+if [[ "${PY}" == cp314-cp314t ]]; then
+    DEPS+=(
+        "${BASE}/brotli-20261022-1/brotli-1.2.1-${PY}-${PLATFORM}.whl"
+        "${BASE}/pycryptodome-20261020-1/pycryptodome-4.1.0-${PY}-${PLATFORM}.whl"
+    )
+
+elif [[ "${PY}" == cp315-cp315 ]]; then
+    DEPS+=(
+    )
+    if [[ "${PLATFORM}" == win_amd64 ]]; then
+        DEPS+=(
+        )
+    fi
+fi
+
+
+if [[ ${#DEPS[@]} != 0 ]]; then
+    uv pip install -U "${DEPS[@]}"
+fi

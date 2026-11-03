@@ -1,35 +1,41 @@
+"""
+$description Global live-streaming platform.
+$url ssh101.com
+$type live
+"""
+
 import re
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http
-from streamlink.stream import HLSStream
-from streamlink.compat import urljoin
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.hls import HLSStream
 
 
+log = getLogger(__name__)
+
+
+@pluginmatcher(
+    re.compile(r"https?://(?:www\.)?ssh101\.com/(?:(?:secure)?live/|detail\.php\?id=\w+)"),
+)
 class SSH101(Plugin):
-    url_re = re.compile(r"https?://(?:\w+\.)?ssh101\.com/(.+)(/vod)?")
-    src_re = re.compile(r'''source.*?src="(?P<url>.*?)"''')
-    iframe_re = re.compile(r'''iframe.*?src="(?P<url>.*?)"''')
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls.url_re.match(url)
-
-    @Plugin.broken(1176)
     def _get_streams(self):
-        res = http.get(self.url)
+        hls_url = self.session.http.get(
+            self.url,
+            schema=validate.Schema(
+                re.compile(r"src:\s*(?P<q>['\"])(?P<url>https://\S+\.m3u8)(?P=q)"),
+                validate.any(None, validate.get("url")),
+            ),
+        )
+        if not hls_url:
+            return
 
-        # some pages have embedded players
-        iframe_m = self.iframe_re.search(res.text)
-        if iframe_m:
-            url = urljoin(self.url, iframe_m.group("url"))
-            res = http.get(url)
+        res = self.session.http.get(hls_url, acceptable_status=(200, 403, 404))
+        if res.status_code != 200 or len(res.text) <= 10:
+            log.error("This stream is currently offline")
+            return
 
-        video = self.src_re.search(res.text)
-        stream_src = video and video.group("url")
-
-        if stream_src and stream_src.endswith("m3u8"):
-            return HLSStream.parse_variant_playlist(self.session, stream_src)
+        return HLSStream.parse_variant_playlist(self.session, hls_url)
 
 
 __plugin__ = SSH101

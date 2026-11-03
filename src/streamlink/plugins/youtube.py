@@ -1,128 +1,65 @@
+"""
+$description Global live-streaming and video hosting social platform owned by Google.
+$url youtube.com
+$url youtu.be
+$type live
+$metadata id
+$metadata author
+$metadata category
+$metadata title
+$notes VOD content and protected videos are not supported
+"""
+
 import re
+from urllib.parse import urlparse, urlunparse
 
-from requests import codes
-
-from streamlink.compat import urlparse, parse_qsl
-from streamlink.plugin import Plugin, PluginError, PluginArguments, PluginArgument
-from streamlink.plugin.api import http, validate, useragents
-from streamlink.plugin.api.utils import parse_query
-from streamlink.stream import HTTPStream, HLSStream
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, PluginError, pluginmatcher
+from streamlink.plugin.api import useragents, validate
 from streamlink.stream.ffmpegmux import MuxedStream
-from streamlink.utils import parse_json, search_dict
-
-API_KEY = "AIzaSyBDBi-4roGzWJN4du9TuDMLd_jVTcVkKz4"
-API_BASE = "https://www.googleapis.com/youtube/v3"
-API_SEARCH_URL = API_BASE + "/search"
-API_VIDEO_INFO = "https://youtube.com/get_video_info"
-HLS_HEADERS = {
-    "User-Agent": "Mozilla/5.0"
-}
+from streamlink.stream.hls import HLSStream
+from streamlink.stream.http import HTTPStream
+from streamlink.utils.data import search_dict
+from streamlink.utils.parse import parse_json
 
 
-def parse_stream_map(stream_map):
-    if not stream_map:
-        return []
-
-    return [parse_query(s) for s in stream_map.split(",")]
+log = getLogger(__name__)
 
 
-def parse_fmt_list(formatsmap):
-    formats = {}
-    if not formatsmap:
-        return formats
-
-    for format in formatsmap.split(","):
-        s = format.split("/")
-        (w, h) = s[1].split("x")
-        formats[int(s[0])] = "{0}p".format(h)
-
-    return formats
-
-
-_config_schema = validate.Schema(
-    {
-        validate.optional("fmt_list"): validate.all(
-            validate.text,
-            validate.transform(parse_fmt_list)
-        ),
-        validate.optional("url_encoded_fmt_stream_map"): validate.all(
-            validate.text,
-            validate.transform(parse_stream_map),
-            [{
-                "itag": validate.all(
-                    validate.text,
-                    validate.transform(int)
-                ),
-                "quality": validate.text,
-                "url": validate.url(scheme="http"),
-                validate.optional("s"): validate.text,
-                validate.optional("stereo3d"): validate.all(
-                    validate.text,
-                    validate.transform(int),
-                    validate.transform(bool)
-                ),
-            }]
-        ),
-        validate.optional("adaptive_fmts"): validate.all(
-            validate.text,
-            validate.transform(parse_stream_map),
-            [{
-                validate.optional("s"): validate.text,
-                "type": validate.all(
-                    validate.text,
-                    validate.transform(lambda t: t.split(";")[0].split("/")),
-                    [validate.text, validate.text]
-                ),
-                "url": validate.all(
-                    validate.url(scheme="http")
-                )
-            }]
-        ),
-        validate.optional("hlsvp"): validate.text,
-        validate.optional("live_playback"): validate.transform(bool),
-        validate.optional("reason"): validate.text,
-        validate.optional("livestream"): validate.text,
-        validate.optional("live_playback"): validate.text,
-        "status": validate.text
-    }
+@pluginmatcher(
+    name="default",
+    pattern=re.compile(
+        r"https?://(?:\w+\.)?youtube\.com/(?:v/|live/|watch\?(?:.*&)?v=)(?P<video_id>[\w-]{11})",
+    ),
 )
-_search_schema = validate.Schema(
-    {
-        "items": [{
-            "id": {
-                "videoId": validate.text
-            }
-        }]
-    },
-    validate.get("items")
+@pluginmatcher(
+    name="channel",
+    pattern=re.compile(
+        r"https?://(?:\w+\.)?youtube\.com/(?:@|c(?:hannel)?/|user/)?(?P<channel>[^/?]+)(?P<live>/live)?/?$",
+    ),
 )
-
-_channelid_re = re.compile(r'meta itemprop="channelId" content="([^"]+)"')
-_livechannelid_re = re.compile(r'meta property="og:video:url" content="([^"]+)')
-_ytdata_re = re.compile(r'window\["ytInitialData"\]\s*=\s*({.*?});', re.DOTALL)
-_url_re = re.compile(r"""
-    http(s)?://(\w+\.)?youtube.com
-    (?:
-        (?:
-            /(watch.+v=|embed/|v/)
-            (?P<video_id>[0-9A-z_-]{11})
-        )
-        |
-        (?:
-            /(user|channel)/(?P<user>[^/?]+)
-        )
-        |
-        (?:
-            /(c/)?(?P<liveChannel>[^/?]+)/live
-        )
-    )
-""", re.VERBOSE)
-
-
+@pluginmatcher(
+    name="embed",
+    pattern=re.compile(
+        r"https?://(?:\w+\.)?youtube\.com/embed/(?:live_stream\?channel=(?P<live>[^/?&]+)|(?P<video_id>[\w-]{11}))",
+    ),
+)
+@pluginmatcher(
+    name="shorthand",
+    pattern=re.compile(
+        r"https?://youtu\.be/(?P<video_id>[\w-]{11})",
+    ),
+)
 class YouTube(Plugin):
+    _re_ytInitialData = re.compile(r"""var\s+ytInitialData\s*=\s*({.*?})\s*;\s*</script>""", re.DOTALL)
+    _re_ytInitialPlayerResponse = re.compile(r"""var\s+ytInitialPlayerResponse\s*=\s*({.*?});\s*var\s+\w+\s*=""", re.DOTALL)
+
+    _url_canonical = "https://www.youtube.com/watch?v={video_id}"
+    _url_channelid_live = "https://www.youtube.com/channel/{channel_id}/live"
+
+    # There are missing itags
     adp_video = {
         137: "1080p",
-        303: "1080p60",  # HFR
         299: "1080p60",  # HFR
         264: "1440p",
         308: "1440p60",  # HFR
@@ -130,6 +67,9 @@ class YouTube(Plugin):
         315: "2160p60",  # HFR
         138: "2160p",
         302: "720p60",  # HFR
+        135: "480p",
+        133: "240p",
+        160: "144p",
     }
     adp_audio = {
         140: 128,
@@ -142,20 +82,24 @@ class YouTube(Plugin):
         258: 258,
     }
 
-    arguments = PluginArguments(
-        PluginArgument(
-            "api-key",
-            sensitive=True,
-            help="API key to use for YouTube API requests"
-        )
-    )
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        parsed = urlparse(self.url)
+
+        # translate input URLs to be able to find embedded data and to avoid unnecessary HTTP redirects
+        if parsed.netloc == "gaming.youtube.com":
+            self.url = urlunparse(parsed._replace(scheme="https", netloc="www.youtube.com"))
+        elif self.matches["shorthand"] or self.matches["embed"] and self.match["video_id"]:
+            self.url = self._url_canonical.format(video_id=self.match["video_id"])
+        elif self.matches["embed"] and self.match["live"]:
+            self.url = self._url_channelid_live.format(channel_id=self.match["live"])
+        elif parsed.scheme != "https":
+            self.url = urlunparse(parsed._replace(scheme="https"))
+
+        self.session.http.headers.update({"User-Agent": useragents.CHROME})
 
     @classmethod
-    def can_handle_url(cls, url):
-        return _url_re.match(url)
-
-    @classmethod
-    def stream_weight(cls, stream):
+    def stream_weight(cls, stream: str) -> tuple[float, str]:
         match_3d = re.match(r"(\w+)_3d", stream)
         match_hfr = re.match(r"(\d+p)(\d+)", stream)
         if match_3d:
@@ -171,197 +115,312 @@ class YouTube(Plugin):
 
         return weight, group
 
-    def _create_adaptive_streams(self, info, streams, protected):
+    @staticmethod
+    def _schema_consent(data):
+        schema_consent = validate.Schema(
+            validate.parse_html(),
+            validate.any(
+                validate.xml_find(".//form[@action='https://consent.youtube.com/s']"),
+                validate.all(
+                    validate.xml_xpath(".//form[@action='https://consent.youtube.com/save']"),
+                    validate.filter(lambda elem: elem.xpath(".//input[@type='hidden'][@name='set_ytc'][@value='true']")),
+                    validate.get(0),
+                ),
+            ),
+            validate.union((
+                validate.get("action"),
+                validate.xml_xpath(".//input[@type='hidden']"),
+            )),
+        )
+        return schema_consent.validate(data)
+
+    def _schema_canonical(self, data):
+        schema_canonical = validate.Schema(
+            validate.parse_html(),
+            validate.xml_xpath_string(".//link[@rel='canonical'][1]/@href"),
+            validate.regex(self.matchers["default"].pattern),
+            validate.get("video_id"),
+        )
+        return schema_canonical.validate(data)
+
+    @classmethod
+    def _schema_playabilitystatus(cls, data):
+        schema = validate.Schema(
+            {
+                "playabilityStatus": {
+                    "status": str,
+                    validate.optional("reason"): validate.any(str, None),
+                },
+            },
+            validate.get("playabilityStatus"),
+            validate.union_get("status", "reason"),
+        )
+        return schema.validate(data)
+
+    @classmethod
+    def _schema_videodetails(cls, data):
+        schema = validate.Schema(
+            {
+                "videoDetails": {
+                    "videoId": str,
+                    "author": str,
+                    "title": str,
+                    validate.optional("isLive"): validate.transform(bool),
+                    validate.optional("isLiveContent"): validate.transform(bool),
+                    validate.optional("isLiveDvrEnabled"): validate.transform(bool),
+                    validate.optional("isLowLatencyLiveStream"): validate.transform(bool),
+                    validate.optional("isPrivate"): validate.transform(bool),
+                },
+                "microformat": validate.all(
+                    validate.any(
+                        validate.all(
+                            {"playerMicroformatRenderer": dict},
+                            validate.get("playerMicroformatRenderer"),
+                        ),
+                        validate.all(
+                            {"microformatDataRenderer": dict},
+                            validate.get("microformatDataRenderer"),
+                        ),
+                    ),
+                    {
+                        "category": str,
+                    },
+                ),
+            },
+            validate.union_get(
+                ("videoDetails", "videoId"),
+                ("videoDetails", "author"),
+                ("microformat", "category"),
+                ("videoDetails", "title"),
+                ("videoDetails", "isLive"),
+            ),
+        )
+        videoDetails = schema.validate(data)
+        log.trace("videoDetails = %r", videoDetails)
+        return videoDetails
+
+    @classmethod
+    def _schema_streamingdata(cls, data):
+        schema = validate.Schema(
+            {
+                "streamingData": {
+                    validate.optional("hlsManifestUrl"): str,
+                    validate.optional("formats"): [
+                        validate.all(
+                            {
+                                "itag": int,
+                                "qualityLabel": str,
+                                validate.optional("url"): validate.url(scheme="http"),
+                            },
+                            validate.union_get("url", "qualityLabel"),
+                        ),
+                    ],
+                    validate.optional("adaptiveFormats"): [
+                        validate.all(
+                            {
+                                "itag": int,
+                                "mimeType": validate.all(
+                                    str,
+                                    validate.regex(
+                                        re.compile(r"""^(?P<type>\w+)/(?P<container>\w+); codecs="(?P<codecs>.+)"$"""),
+                                    ),
+                                    validate.union_get("type", "codecs"),
+                                ),
+                                validate.optional("url"): validate.url(scheme="http"),
+                                validate.optional("qualityLabel"): str,
+                            },
+                            validate.union_get("url", "qualityLabel", "itag", "mimeType"),
+                        ),
+                    ],
+                },
+            },
+            validate.get("streamingData"),
+            validate.union_get("hlsManifestUrl", "formats", "adaptiveFormats"),
+        )
+        hls_manifest, formats, adaptive_formats = schema.validate(data)
+        return hls_manifest, formats or [], adaptive_formats or []
+
+    def _create_adaptive_streams(self, adaptive_formats):
+        streams = {}
         adaptive_streams = {}
+        audio_streams = {}
         best_audio_itag = None
 
-        # Extract audio streams from the DASH format list
-        for stream_info in info.get("adaptive_fmts", []):
-            if stream_info.get("s"):
-                protected = True
+        # Extract audio streams from the adaptive format list
+        for url, _label, itag, mimeType in adaptive_formats:
+            if url is None:
                 continue
 
-            stream_params = dict(parse_qsl(stream_info["url"]))
-            if "itag" not in stream_params:
-                continue
-            itag = int(stream_params["itag"])
             # extract any high quality streams only available in adaptive formats
-            adaptive_streams[itag] = stream_info["url"]
+            adaptive_streams[itag] = url
+            stream_type, stream_codec = mimeType
+            stream_codec = re.sub(r"^(\w+).*$", r"\1", stream_codec)
 
-            stream_type, stream_format = stream_info["type"]
-            if stream_type == "audio":
-                stream = HTTPStream(self.session, stream_info["url"])
-                name = "audio_{0}".format(stream_format)
-                streams[name] = stream
+            if stream_type == "audio" and itag in self.adp_audio:
+                audio_bitrate = self.adp_audio[itag]
+                if stream_codec not in audio_streams or audio_bitrate > self.adp_audio[audio_streams[stream_codec]]:
+                    audio_streams[stream_codec] = itag
 
                 # find the best quality audio stream m4a, opus or vorbis
-                if best_audio_itag is None or self.adp_audio[itag] > self.adp_audio[best_audio_itag]:
+                if best_audio_itag is None or audio_bitrate > self.adp_audio[best_audio_itag]:
                     best_audio_itag = itag
+
+        if (
+            not best_audio_itag
+            or self.session.http.head(adaptive_streams[best_audio_itag], raise_for_status=False).status_code >= 400
+        ):
+            return {}
+
+        streams.update({
+            f"audio_{stream_codec}": HTTPStream(self.session, adaptive_streams[itag])
+            for stream_codec, itag in audio_streams.items()
+        })
 
         if best_audio_itag and adaptive_streams and MuxedStream.is_usable(self.session):
             aurl = adaptive_streams[best_audio_itag]
             for itag, name in self.adp_video.items():
-                if itag in adaptive_streams:
-                    vurl = adaptive_streams[itag]
-                    self.logger.debug("MuxedStream: v {video} a {audio} = {name}".format(
-                        audio=best_audio_itag,
-                        name=name,
-                        video=itag,
-                    ))
-                    streams[name] = MuxedStream(self.session,
-                                                HTTPStream(self.session, vurl),
-                                                HTTPStream(self.session, aurl))
+                if itag not in adaptive_streams:
+                    continue
+                vurl = adaptive_streams[itag]
+                log.debug(f"MuxedStream: v {itag} a {best_audio_itag} = {name}")
+                streams[name] = MuxedStream(
+                    self.session,
+                    HTTPStream(self.session, vurl),
+                    HTTPStream(self.session, aurl),
+                )
 
-        return streams, protected
+        return streams
 
-    def _find_channel_video(self):
-        res = http.get(self.url)
+    def _get_res(self, url):
+        res = self.session.http.get(url)
+        if urlparse(res.url).netloc == "consent.youtube.com":
+            target, elems = self._schema_consent(res.text)
+            c_data = {
+                elem.attrib.get("name"): elem.attrib.get("value")
+                for elem in elems
+            }  # fmt: skip
+            log.debug(f"consent target: {target}")
+            log.debug(f"consent data: {', '.join(c_data.keys())}")
+            res = self.session.http.post(target, data=c_data)
+        return res
 
-        datam = _ytdata_re.search(res.text)
-        if datam:
-            data = parse_json(datam.group(1))
-            # find the videoRenderer object, where there is a LVE NOW badge
-            for x in search_dict(data, 'videoRenderer'):
-                for bstyle in search_dict(x.get("badges", {}), "style"):
-                    if bstyle == "BADGE_STYLE_TYPE_LIVE_NOW":
-                        if x.get("videoId"):
-                            self.logger.debug("Found channel video ID via HTML: {0}", x["videoId"])
-                            return x["videoId"]
+    @staticmethod
+    def _get_data_from_regex(res, regex, descr):
+        match = re.search(regex, res.text)
+        if not match:
+            log.debug(f"Missing {descr}")
+            return
+        return parse_json(match.group(1))
 
-        else:
-            # fall back on API
-            self.logger.debug("No channel data, falling back to API")
-            match = _channelid_re.search(res.text)
-            if not match:
+    def _get_data_from_api(self, res):
+        try:
+            video_id = self.match["video_id"]
+        except IndexError:
+            video_id = None
+
+        if video_id is None:
+            try:
+                video_id = self._schema_canonical(res.text)
+            except (PluginError, TypeError):
                 return
 
-            channel_id = match.group(1)
-            self.logger.debug("Found channel_id: {0}".format(channel_id))
-            return self._get_channel_video(channel_id)
-
-    def _get_channel_video(self, channel_id):
-        query = {
-            "channelId": channel_id,
-            "type": "video",
-            "eventType": "live",
-            "part": "id",
-            "key": self.get_option("api_key") or API_KEY
-        }
-        res = http.get(API_SEARCH_URL, params=query, raise_for_status=False)
-        if res.status_code == codes.ok:
-            videos = http.json(res, schema=_search_schema)
-
-            for video in videos:
-                video_id = video["id"]["videoId"]
-                self.logger.debug("Found video_id: {0}".format(video_id))
-                return video_id
+        if m := re.search(r"""(?P<q1>["'])INNERTUBE_API_KEY(?P=q1)\s*:\s*(?P<q2>["'])(?P<data>.+?)(?P=q2)""", res.text):
+            api_key = m.group("data")
         else:
-            try:
-                errors = http.json(res, exception=ValueError)
-                self.logger.error("Cloud not resolve channel video:")
-                for error in errors['error']['errors']:
-                    self.logger.error("  {message} ({reason})".format(**error))
+            api_key = "AIzaSyAO_FJ2SlqU8Q4STEHLGCilw_Y9_11qcW8"
 
-            except ValueError:
-                self.logger.error("Cloud not resolve channel video: {0} error".format(res.status_code))
+        return self.session.http.post(
+            "https://www.youtube.com/youtubei/v1/player",
+            headers={"Content-Type": "application/json"},
+            params={"key": api_key},
+            json={
+                "videoId": video_id,
+                "contentCheckOk": True,
+                "racyCheckOk": True,
+                "context": {
+                    "client": {
+                        "clientName": "ANDROID",
+                        "clientVersion": "21.08.266",
+                        "platform": "DESKTOP",
+                        "clientScreen": "EMBED",
+                        "clientFormFactor": "UNKNOWN_FORM_FACTOR",
+                        "browserName": "Chrome",
+                    },
+                    "user": {"lockedSafetyMode": "false"},
+                    "request": {"useSsl": "true"},
+                },
+            },
+            schema=validate.Schema(
+                validate.parse_json(),
+            ),
+        )
 
-    def _find_canonical_stream_info(self):
-        res = http.get(self.url)
-        match = _livechannelid_re.search(res.text)
-        if not match:
-            return
-
-        return self._get_stream_info(match.group(1))
-
-    def _get_stream_info(self, url):
-        match = _url_re.match(url)
-        user = match.group("user")
-        live_channel = match.group("liveChannel")
-
-        if user:
-            video_id = self._find_channel_video()
-        elif live_channel:
-            return self._find_canonical_stream_info()
-        else:
-            video_id = match.group("video_id")
-            if video_id == "live_stream":
-                query_info = dict(parse_qsl(urlparse(url).query))
-                if "channel" in query_info:
-                    video_id = self._get_channel_video(query_info["channel"])
-
-        if not video_id:
-            return
-
-        # normal
-        _params_1 = {"el": "detailpage"}
-        # age restricted
-        _params_2 = {"el": "embedded"}
-        # embedded restricted
-        _params_3 = {"eurl": "https://youtube.googleapis.com/v/{0}".format(video_id)}
-
-        count = 0
-        info_parsed = None
-        for _params in (_params_1, _params_2, _params_3):
-            count += 1
-            params = {"video_id": video_id}
-            params.update(_params)
-
-            res = http.get(API_VIDEO_INFO, params=params, headers=HLS_HEADERS)
-            info_parsed = parse_query(res.text, name="config", schema=_config_schema)
-            if info_parsed.get("status") == "fail":
-                self.logger.debug("get_video_info - {0}: {1}".format(
-                    count, info_parsed.get("reason"))
-                )
-                continue
-            self.logger.debug("get_video_info - {0}: Found data".format(count))
-            break
-
-        return info_parsed
+    @staticmethod
+    def _data_video_id(data):
+        if not data:
+            return None
+        for key in ("videoRenderer", "gridVideoRenderer"):
+            for videoRenderer in search_dict(data, key):
+                videoId = videoRenderer.get("videoId")
+                if videoId is not None:
+                    return videoId
 
     def _get_streams(self):
-        http.headers.update({'User-Agent': useragents.CHROME})
-        is_live = False
+        res = self._get_res(self.url)
 
-        info = self._get_stream_info(self.url)
-        if not info:
+        if self.matches["channel"] and not self.match["live"]:
+            initial = self._get_data_from_regex(res, self._re_ytInitialData, "initial data")
+            video_id = self._data_video_id(initial)
+            if video_id is None:
+                log.error("Could not find videoId on channel page")
+                return
+            self.url = self._url_canonical.format(video_id=video_id)
+            res = self._get_res(self.url)
+
+        # TODO: clean up the validation schemas and how they're applied
+
+        if not (data := self._get_data_from_api(res)):
+            return
+        status, reason = self._schema_playabilitystatus(data)
+        # assume that there's an error if reason is set (status will still be "OK" for some reason)
+        if status != "OK" or reason:
+            log.error(f"Could not get video info - {status}: {reason}")
             return
 
-        if info.get("livestream") == '1' or info.get("live_playback") == '1':
-            self.logger.debug("This video is live.")
-            is_live = True
+        # the initial player response contains the category data, which the API response does not
+        init_player_response = self._get_data_from_regex(res, self._re_ytInitialPlayerResponse, "initial player response")
+        self.id, self.author, self.category, self.title, is_live = self._schema_videodetails(init_player_response)
+        log.debug(f"Using video ID: {self.id}")
 
-        formats = info.get("fmt_list")
+        if is_live:
+            log.debug("This video is live.")
+
+        # TODO: remove parsing of non-HLS stuff, as we don't support this
         streams = {}
-        protected = False
-        for stream_info in info.get("url_encoded_fmt_stream_map", []):
-            if stream_info.get("s"):
-                protected = True
+        hls_manifest, formats, adaptive_formats = self._schema_streamingdata(data)
+
+        protected = any(url is None for url, *_ in formats + adaptive_formats)
+        if protected:
+            log.debug("This video may be protected.")
+
+        for url, label in formats:
+            if url is None:
                 continue
-
-            stream = HTTPStream(self.session, stream_info["url"])
-            name = formats.get(stream_info["itag"]) or stream_info["quality"]
-
-            if stream_info.get("stereo3d"):
-                name += "_3d"
-
-            streams[name] = stream
+            if self.session.http.head(url, raise_for_status=False).status_code >= 400:
+                break
+            streams[label] = HTTPStream(self.session, url)
 
         if not is_live:
-            streams, protected = self._create_adaptive_streams(info, streams, protected)
+            streams.update(self._create_adaptive_streams(adaptive_formats))
 
-        hls_playlist = info.get("hlsvp")
-        if hls_playlist:
-            try:
-                hls_streams = HLSStream.parse_variant_playlist(
-                    self.session, hls_playlist, headers=HLS_HEADERS, namekey="pixels"
-                )
-                streams.update(hls_streams)
-            except IOError as err:
-                self.logger.warning("Failed to extract HLS streams: {0}", err)
+        if hls_manifest:
+            streams.update(HLSStream.parse_variant_playlist(self.session, hls_manifest, name_key="pixels"))
 
-        if not streams and protected:
-            raise PluginError("This plugin does not support protected videos, "
-                              "try youtube-dl instead")
+        if not streams:
+            if protected:
+                raise PluginError("This plugin does not support protected videos, try yt-dlp instead")
+            if formats or adaptive_formats:
+                raise PluginError("This plugin does not support VOD content, try yt-dlp instead")
 
         return streams
 

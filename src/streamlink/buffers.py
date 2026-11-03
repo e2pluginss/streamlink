@@ -15,7 +15,7 @@ class Chunk(BytesIO):
         return self.tell() == self.length
 
 
-class Buffer(object):
+class Buffer:
     """Simple buffer for use in single-threaded consumer/filler.
 
     Stores chunks in a deque to avoid inefficient reallocating
@@ -27,14 +27,14 @@ class Buffer(object):
         self.current_chunk = None
         self.closed = False
         self.length = 0
+        self.written_once = False
 
     def _iterate_chunks(self, size):
         bytes_left = size
 
         while bytes_left:
             try:
-                current_chunk = (self.current_chunk or
-                                 Chunk(self.chunks.popleft()))
+                current_chunk = self.current_chunk or Chunk(self.chunks.popleft())
             except IndexError:
                 break
 
@@ -53,6 +53,7 @@ class Buffer(object):
             data = bytes(data)  # Copy so that original buffer may be reused
             self.chunks.append(data)
             self.length += len(data)
+            self.written_once = True
 
     def read(self, size=-1):
         if size < 0 or size > self.length:
@@ -84,15 +85,15 @@ class RingBuffer(Buffer):
         self.event_used = Event()
 
     def _check_events(self):
-        if self.length > 0:
-            self.event_used.set()
-        else:
-            self.event_used.clear()
-
         if self.is_full:
             self.event_free.clear()
         else:
             self.event_free.set()
+
+        if self.length > 0:
+            self.event_used.set()
+        else:
+            self.event_used.clear()
 
     def _read(self, size=-1):
         with self.buffer_lock:
@@ -104,11 +105,8 @@ class RingBuffer(Buffer):
 
     def read(self, size=-1, block=True, timeout=None):
         if block and not self.closed:
-            self.event_used.wait(timeout)
-
-            # If the event is still not set it's a timeout
-            if not self.event_used.is_set() and self.length == 0:
-                raise IOError("Read timeout")
+            if not self.event_used.wait(timeout) and self.length == 0:
+                raise OSError("Read timeout")
 
         return self._read(size)
 
@@ -129,7 +127,7 @@ class RingBuffer(Buffer):
                 write_len = min(self.free, data_left)
                 written = data_total - data_left
 
-                Buffer.write(self, data[written:written + write_len])
+                Buffer.write(self, data[written : written + write_len])
                 data_left -= write_len
 
                 self._check_events()
@@ -141,10 +139,10 @@ class RingBuffer(Buffer):
             self._check_events()
 
     def wait_free(self, timeout=None):
-        self.event_free.wait(timeout)
+        return self.event_free.wait(timeout)
 
     def wait_used(self, timeout=None):
-        self.event_used.wait(timeout)
+        return self.event_used.wait(timeout)
 
     def close(self):
         Buffer.close(self)

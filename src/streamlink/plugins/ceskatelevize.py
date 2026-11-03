@@ -1,139 +1,154 @@
 """
-Plugin for Czech TV (Ceska televize).
-
-Following channels are working:
-    * CT1 - http://www.ceskatelevize.cz/ct1/zive/
-    * CT2 - http://www.ceskatelevize.cz/ct2/zive/
-    * CT24 - http://www.ceskatelevize.cz/ct24/
-    * CT sport - http://www.ceskatelevize.cz/sport/zive-vysilani/
-    * CT Decko - http://decko.ceskatelevize.cz/zive/
-    * CT Art - http://www.ceskatelevize.cz/art/zive/
-
-Additionally, videos from iVysilani archive should work as well.
+$description Live TV channels from CT, a Czech public, state-owned broadcaster.
+$url ceskatelevize.cz
+$type live
+$metadata id
+$metadata title
+$region Czechia
 """
+
 import re
+from uuid import uuid4
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http, validate
-from streamlink.stream import HLSStream
-from streamlink.exceptions import PluginError
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.dash import DASHStream
 
-_url_re = re.compile(
-    r'http(s)?://([^.]*.)?ceskatelevize.cz'
+
+log = getLogger(__name__)
+
+
+@pluginmatcher(
+    name="channel",
+    pattern=re.compile(r"https?://(?P<channel>ct24|decko)\.ceskatelevize\.cz/"),
 )
-_player_re = re.compile(
-    r'ivysilani/embed/iFramePlayer[^"]+'
+@pluginmatcher(
+    name="sport",
+    pattern=re.compile(r"https?://sport\.ceskatelevize\.cz/"),
 )
-_hash_re = re.compile(
-    r'hash:"([0-9a-z]+)"'
+@pluginmatcher(
+    name="default",
+    pattern=re.compile(r"https?://(?:www\.)?ceskatelevize\.cz/zive/\w+"),
 )
-_playlist_info_re = re.compile(
-    r'{"type":"([a-z]+)","id":"([0-9]+)"'
-)
-_playlist_url_schema = validate.Schema({
-    "url": validate.any(
-        validate.url(),
-        "error_region"
-    )
-})
-_playlist_schema = validate.Schema({
-    "playlist": [{
-        "streamUrls": {
-            "main": validate.url(),
-        }
-    }]
-})
-
-
-def _find_playlist_info(response):
-    """
-    Finds playlist info (type, id) in HTTP response.
-
-    :param response: Response object.
-    :returns: Dictionary with type and id.
-    """
-    values = {}
-    matches = _playlist_info_re.search(response.text)
-    if matches:
-        values['type'] = matches.group(1)
-        values['id'] = matches.group(2)
-
-    return values
-
-
-def _find_player_url(response):
-    """
-    Finds embedded player url in HTTP response.
-
-    :param response: Response object.
-    :returns: Player url (str).
-    """
-    url = ''
-    matches = _player_re.search(response.text)
-    if matches:
-        tmp_url = matches.group(0).replace('&amp;', '&')
-        if 'hash' not in tmp_url:
-            # there's no hash in the URL, try to find it
-            matches = _hash_re.search(response.text)
-            if matches:
-                url = tmp_url + '&hash=' + matches.group(1)
-        else:
-            url = tmp_url
-
-    return 'http://ceskatelevize.cz/' + url
-
-
 class Ceskatelevize(Plugin):
+    URL_API_CHANNEL = "https://api.ceskatelevize.cz/video/v1/playlist-live/v1/stream-data/channel/{channel}"
 
-    @classmethod
-    def can_handle_url(cls, url):
-        return _url_re.match(url)
+    CHANNELS = {
+        "ct24": "CH_24",
+        "decko": "CH_5",
+    }
 
-    def _get_streams(self):
-        # fetch requested url and find playlist info
-        response = http.get(self.url)
-        info = _find_playlist_info(response)
-
-        if not info:
-            # playlist info not found, let's try to find player url
-            player_url = _find_player_url(response)
-            if not player_url:
-                raise PluginError('Cannot find playlist info or player url!')
-
-            # get player url and try to find playlist info in it
-            response = http.get(player_url)
-            info = _find_playlist_info(response)
-            if not info:
-                raise PluginError('Cannot find playlist info in the player url!')
-
-        data = {
-            'playlist[0][type]': info['type'],
-            'playlist[0][id]': info['id'],
-            'requestUrl': '/ivysilani/embed/iFramePlayerCT24.php',
-            'requestSource': 'iVysilani',
-            'type': 'html'
-        }
-        headers = {
-            'x-addr': '127.0.0.1',
-        }
-
-        # fetch playlist url
-        response = http.post(
-            'http://www.ceskatelevize.cz/ivysilani/ajax/get-client-playlist',
-            data=data,
-            headers=headers
-        )
-        json_data = http.json(response, schema=_playlist_url_schema)
-
-        if json_data['url'] == "error_region":
-            self.logger.error("This stream is not available in your territory")
+    def get_streams_from_api(self, channel):
+        if not channel:
             return
 
-        # fetch playlist
-        response = http.post(json_data['url'])
-        json_data = http.json(response, schema=_playlist_schema)
-        playlist = json_data['playlist'][0]['streamUrls']['main']
-        return HLSStream.parse_variant_playlist(self.session, playlist)
+        self.title, is_blocked, url = self.session.http.get(
+            self.URL_API_CHANNEL.format(channel=channel),
+            params={
+                "canPlayDRM": "false",
+                "streamType": "dash",
+                "quality": "web",
+                "maxQualityCount": 5,
+                "sessionId": str(uuid4()),
+            },
+            schema=validate.Schema(
+                validate.parse_json(),
+                {
+                    "streamUrls": {
+                        "isBlocked": bool,
+                        "main": validate.url(),
+                    },
+                    "title": str,
+                },
+                validate.union_get(
+                    "title",
+                    ("streamUrls", "isBlocked"),
+                    ("streamUrls", "main"),
+                ),
+            ),
+        )
+
+        if is_blocked:
+            log.error("The stream is inaccessible")
+            return
+
+        return url
+
+    def get_streams_channel(self):
+        self.id = self.CHANNELS.get(self.match["channel"])
+
+        return self.get_streams_from_api(self.id)
+
+    def get_streams_sport(self):
+        schema = validate.Schema(
+            validate.parse_html(),
+            validate.xml_xpath_string(".//script[@id='__NEXT_DATA__'][text()][1]/text()"),
+            validate.none_or_all(
+                str,
+                validate.parse_json(),
+                {
+                    "props": {
+                        "pageProps": {
+                            "liveData": validate.any(
+                                # Prefer explicit broadcast id (eg "CH_4")
+                                validate.all({"id": str}, validate.get("id")),
+                                # Fallback to encoder (also "CH_4")
+                                validate.all(
+                                    {"current": {"encoder": str}},
+                                    validate.get(("current", "encoder")),
+                                ),
+                            ),
+                        },
+                    },
+                },
+                validate.get(("props", "pageProps", "liveData")),
+            ),
+        )
+
+        self.id = self.session.http.get(self.url, schema=schema)
+
+        return self.get_streams_from_api(self.id)
+
+    def get_streams_default(self):
+        schema = validate.Schema(
+            validate.parse_html(),
+            validate.xml_xpath_string(".//script[@id='__NEXT_DATA__'][text()]/text()"),
+            str,
+            validate.parse_json(),
+            {
+                "props": {
+                    "pageProps": {
+                        validate.optional("data"): validate.all(
+                            {
+                                "liveBroadcast": {
+                                    "id": str,
+                                },
+                            },
+                            validate.get(("liveBroadcast", "id")),
+                        ),
+                    },
+                },
+            },
+            validate.get(("props", "pageProps", "data")),
+        )
+
+        self.id = self.session.http.get(self.url, schema=schema)
+
+        return self.get_streams_from_api(self.id)
+
+    def _get_streams(self):
+        if self.matches["channel"]:
+            url = self.get_streams_channel()
+        elif self.matches["sport"]:
+            url = self.get_streams_sport()
+        else:
+            url = self.get_streams_default()
+
+        if not url:
+            return
+
+        return DASHStream.parse_manifest(self.session, url)
 
 
 __plugin__ = Ceskatelevize

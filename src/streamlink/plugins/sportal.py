@@ -1,57 +1,35 @@
-from __future__ import print_function
+"""
+$description Sporting channel live stream owned by Sportal, a Bulgarian sports media website.
+$url sportal.bg
+$type live
+"""
+
 import re
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http
-from streamlink.plugin.api import validate
-from streamlink.stream import RTMPStream
-from streamlink.plugins.common_jwplayer import _js_to_json
-from streamlink.utils import parse_json
+from streamlink.logger import getLogger
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.stream.hls import HLSStream
 
 
+log = getLogger(__name__)
+
+
+@pluginmatcher(
+    re.compile(r"https?://(?:www\.)?sportal\.bg/sportal_live_tv\.php"),
+)
 class Sportal(Plugin):
-    swf_url = "http://img2.sportal.bg/images/svp/videoplayer.swf"
-    url_re = re.compile(r"https?://(?:www\.)?sportal\.bg/sportal_live_tv.php.*")
-    _playlist_re = re.compile(r"\(\{.*playlist: (\[.*\]),.*?\}\);", re.DOTALL)
-    _playlist_schema = validate.Schema(
-        validate.transform(_playlist_re.search),
-        validate.any(
-            None,
-            validate.all(
-                validate.get(1),
-                validate.transform(_js_to_json),
-                validate.transform(parse_json),
-                [{
-                    "streamer": validate.url(scheme="rtmp"),
-                    "levels": [
-                        {"bitrate": int, "file": validate.text}
-                    ]
-                }],
-                validate.get(0)
-            )
-        )
-    )
+    _hls_re = re.compile(r"""["'](?P<url>[^"']+\.m3u8[^"']*?)["']""")
 
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls.url_re.match(url) is not None
-
-    @Plugin.broken(1165)
     def _get_streams(self):
-        res = http.get(self.url)
+        res = self.session.http.get(self.url)
+        m = self._hls_re.search(res.text)
+        if not m:
+            return
 
-        playlist = self._playlist_schema.validate(res.text)
-        if playlist:
-            for level in playlist["levels"]:
-                q = "{0}k".format(level["bitrate"])
-                s = RTMPStream(self.session,
-                               redirect=True,
-                               params={"rtmp": playlist["streamer"],
-                                       "playpath": level["file"],
-                                       "pageUrl": self.url,
-                                       "z": True,
-                                       "swfUrl": self.swf_url})
-                yield q, s
+        hls_url = m.group("url")
+        log.debug(f"URL={hls_url}")
+        log.warning("SSL certificate verification is disabled.")
+        return HLSStream.parse_variant_playlist(self.session, hls_url, verify=False).items()
 
 
 __plugin__ = Sportal

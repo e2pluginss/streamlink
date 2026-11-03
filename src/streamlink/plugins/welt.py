@@ -1,85 +1,72 @@
+"""
+$description German news and documentaries TV channel, owned by Axel Springer SE.
+$url welt.de
+$type live, vod
+$metadata title
+$region Germany
+$notes Some VODs are mp4 which may not stream, use -o to download
+"""
+
 import re
 
-from streamlink.compat import quote
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http, useragents, validate
-from streamlink.stream import HLSStream
-from streamlink.utils import parse_json
+from streamlink.plugin import Plugin, pluginmatcher
+from streamlink.plugin.api import validate
+from streamlink.stream.hls import HLSStream
+from streamlink.stream.http import HTTPStream
 
 
-def _filter_url(url):
-    try:
-        Welt._schema_url.validate(url)
-        return True
-    except:
-        return False
-
-
+@pluginmatcher(
+    re.compile(r"https?://(\w+\.)?welt\.de/?"),
+)
 class Welt(Plugin):
-    _url_vod = "https://www.welt.de/onward/video/token/{0}"
-    _re_url = re.compile(
-        r"""https?://(\w+\.)?welt\.de/?""",
-        re.IGNORECASE
-    )
-    _re_url_vod = re.compile(
-        r"""mediathek""",
-        re.IGNORECASE
-    )
-    _re_json = re.compile(
-        r"""
-            <script>\s*
-            var\s+funkotron\s*=\s*
-            \{\s*
-                config\s*:\s*(?P<json>\{.+?\})\s*
-            \}\s*;?\s*
-            </script>
-        """,
-        re.VERBOSE | re.DOTALL | re.IGNORECASE
-    )
-    _schema = validate.Schema(
-        validate.transform(_re_json.search),
-        validate.get("json"),
-        validate.transform(parse_json),
-        validate.get("page"),
-        validate.get("content"),
-        validate.get("media"),
-        validate.get(0),
-        validate.get("sources"),
-        validate.map(lambda obj: obj["file"]),
-        validate.filter(_filter_url),
-        validate.get(0)
-    )
-    _schema_url = validate.Schema(
-        validate.url(
-            scheme="https",
-            path=validate.endswith(".m3u8")
-        )
-    )
-    _schema_vod = validate.Schema(
-        validate.transform(parse_json),
-        validate.get("urlWithToken"),
-        _schema_url
-    )
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls._re_url.match(url) is not None
-
-    def __init__(self, url):
-        Plugin.__init__(self, url)
-        self.url = url
-        self.isVod = self._re_url_vod.search(url) is not None
+    _re_vod_quality = re.compile(r"_(\d+)\.mp4$")
 
     def _get_streams(self):
-        headers = {"User-Agent": useragents.CHROME}
-        hls_url = http.get(self.url, headers=headers, schema=self._schema)
-        headers["Referer"] = self.url
+        data = self.session.http.get(
+            self.url,
+            schema=validate.Schema(
+                validate.parse_html(),
+                validate.xml_xpath_string("""
+                    .//script
+                    [starts-with(@data-internal-ref,'WeltVideoPlayer-') or @data-content='VideoPlayer.Config']
+                    /text()
+                """),
+                validate.none_or_all(
+                    str,
+                    validate.parse_json(),
+                    {
+                        "title": str,
+                        "sources": [
+                            validate.all(
+                                {
+                                    "src": validate.url(),
+                                    "extension": str,
+                                },
+                                validate.union_get("extension", "src"),
+                            ),
+                        ],
+                    },
+                    validate.union_get("sources", "title"),
+                ),
+            ),
+        )
+        if not data:
+            return
 
-        if self.isVod:
-            url = self._url_vod.format(quote(hls_url, safe=""))
-            hls_url = http.get(url, headers=headers, schema=self._schema_vod)
+        sources, self.title = data
 
-        return HLSStream.parse_variant_playlist(self.session, hls_url, headers=headers)
+        self.session.http.headers.update({"Referer": self.url})
+
+        http_streams = {}
+        for extension, src in sources:
+            if extension == "m3u8":
+                return HLSStream.parse_variant_playlist(self.session, src)
+            if extension == "mp4":
+                quality = self._re_vod_quality.search(src)
+                if quality:
+                    http_streams[f"{quality[1]}k"] = HTTPStream(self.session, src)
+
+        return http_streams
 
 
 __plugin__ = Welt

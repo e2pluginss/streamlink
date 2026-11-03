@@ -1,45 +1,31 @@
-from __future__ import print_function
+"""
+$description A privately owned Turkish live TV channel.
+$url tv360.com.tr
+$type live
+"""
+
 import re
-from functools import partial
 
-from streamlink.plugin import Plugin
-from streamlink.plugin.api import http
+from streamlink.plugin import Plugin, pluginmatcher
 from streamlink.plugin.api import validate
-from streamlink.stream import HLSStream
-from streamlink.utils import parse_json
+from streamlink.stream.hls import HLSStream
 
 
+@pluginmatcher(
+    re.compile(r"https?://(?:www\.)?tv360\.com\.tr/canli-yayin"),
+)
 class TV360(Plugin):
-    url_re = re.compile(r"https?://(?:www.)?tv360.com.tr/CanliYayin")
-    data_re = re.compile(r'''div.*?data-tp=(?P<q>["'])(?P<data>.*?)(?P=q)''', re.DOTALL)
-    _js_to_json = partial(re.compile(r"""(\w+):(["']|\d+,|true|false)""").sub, r'"\1":\2')
-    data_schema = validate.Schema(
-        validate.transform(data_re.search),
-        validate.any(
-            None,
-            validate.all(
-                validate.get("data"),
-                validate.transform(_js_to_json),
-                validate.transform(lambda x: x.replace("'", '"')),
-                validate.transform(parse_json),
-                {
-                    "tp_type": "hls4",
-                    "tp_file": validate.url(),
-                }
-            )
-        )
-    )
-
-    @classmethod
-    def can_handle_url(cls, url):
-        return cls.url_re.match(url) is not None
-
     def _get_streams(self):
-        res = http.get(self.url)
-        data = self.data_schema.validate(res.text)
-
-        if data:
-            return HLSStream.parse_variant_playlist(self.session, data["tp_file"])
+        hls_url = self.session.http.get(
+            self.url,
+            schema=validate.Schema(
+                validate.parse_html(),
+                validate.xml_xpath_string(".//video/source[@src][@type='application/x-mpegURL'][1]/@src"),
+                validate.none_or_all(validate.url()),
+            ),
+        )
+        if hls_url:
+            return HLSStream.parse_variant_playlist(self.session, hls_url)
 
 
 __plugin__ = TV360

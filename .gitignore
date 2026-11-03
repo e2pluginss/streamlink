@@ -1,53 +1,25 @@
-# OS and editors
-.DS_Store
-._*
+.*
+!.git*
+!/.github/
+!.editorconfig
+!.*.yml
+
 Thumbs.db
 Desktop.ini
-*.bak
-.cache
-.project
-.settings
-.tmproj
-nbproject
-*.sublime-project
-*.sublime-workspace
-.idea
 
-*.mo
-*.egg-info
+*.py[cod]
 *.egg
-*.EGG
-*.EGG-INFO
-bin
-build
-build-win32
-develop-eggs
-downloads
-eggs
-fake-eggs
-parts
-dist
-.installed.cfg
-.mr.developer.cfg
-.hg
-.bzr
-.svn
-*.pyc
-*.pyo
+*.egg-info
+*.mo
+*.pot
+*.bak
 *.tmp*
 *.swp
-docs/_build
-include/
-lib/
-local/
-share/
-pip-selfcheck.json
-.pytest_cache/
 
-# ignore any key files
-*.key
+/build/
+/completions/
+/docs/_build/
+/dist/
 
-# coverage
-.coverage
 coverage.xml
 htmlcov

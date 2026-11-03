@@ -1,53 +1,90 @@
-import os
-import random
-import threading
+from __future__ import annotations
 
+import concurrent.futures
+import re
 import subprocess
-
 import sys
+import threading
+from contextlib import suppress
+from functools import lru_cache
+from itertools import zip_longest
+from pathlib import Path
+from shutil import which
+from typing import TYPE_CHECKING, Any, ClassVar, Generic, TextIO, TypeVar
 
 from streamlink import StreamError
-from streamlink.stream import Stream
-from streamlink.stream.stream import StreamIO
-from streamlink.utils import NamedPipe
-from streamlink.compat import devnull, which
-import logging
-
-log = logging.getLogger(__name__)
+from streamlink.logger import getLogger
+from streamlink.stream.stream import Stream, StreamIO
+from streamlink.utils.named_pipe import NamedPipe
+from streamlink.utils.processoutput import ProcessOutput
 
 
-class MuxedStream(Stream):
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from streamlink.utils.named_pipe import NamedPipeBase
+
+
+log = getLogger(__name__)
+
+_lock_resolve_command = threading.Lock()
+
+
+TSubstreams_co = TypeVar("TSubstreams_co", bound=Stream, covariant=True)
+
+
+class MuxedStream(Stream, Generic[TSubstreams_co]):
+    """
+    Muxes multiple streams into one output stream.
+    """
+
     __shortname__ = "muxed-stream"
 
-    def __init__(self, session, *substreams, **options):
-        super(MuxedStream, self).__init__(session)
-        self.substreams = substreams
-        self.subtitles = options.pop("subtitles", {})
-        self.options = options
+    def __init__(
+        self,
+        session,
+        *substreams: TSubstreams_co,
+        **options,
+    ):
+        """
+        :param streamlink.Streamlink session: Streamlink session instance
+        :param substreams: Video and/or audio streams
+        :param options: Additional keyword arguments passed to :class:`ffmpegmux.FFMPEGMuxer`.
+                        Subtitle streams need to be set via the ``subtitles`` keyword.
+        """
 
-    def open(self):
-        fds = []
+        super().__init__(session)
+        self.substreams: Sequence[TSubstreams_co] = substreams
+        self.subtitles: dict[str, Stream] = options.pop("subtitles", {})
+        self.options: dict[str, Any] = options
+
+    def _open_streams(self) -> list[StreamIO]:
+        fds: list[StreamIO] = []
         metadata = self.options.get("metadata", {})
         maps = self.options.get("maps", [])
         # only update the maps values if they haven't been set
         update_maps = not maps
-        for i, substream in enumerate(self.substreams):
-            log.debug("Opening {0} substream".format(substream.shortname()))
+        for stream in self.substreams:
+            log.debug("Opening %s substream", stream.shortname())
             if update_maps:
                 maps.append(len(fds))
-            fds.append(substream and substream.open())
+            fds.append(stream.open())
 
         for i, subtitle in enumerate(self.subtitles.items()):
-            language, substream = subtitle
-            log.debug("Opening {0} subtitle stream".format(substream.shortname()))
+            language, subtitle_stream = subtitle
+            log.debug("Opening %s subtitle stream", subtitle_stream.shortname())
             if update_maps:
                 maps.append(len(fds))
-            fds.append(substream and substream.open())
-            metadata["s:s:{0}".format(i)] = ["language={0}".format(language)]
+            fds.append(subtitle_stream.open())
+            metadata[f"s:s:{i}"] = [f"language={language}"]
 
         self.options["metadata"] = metadata
         self.options["maps"] = maps
 
+        return fds
+
+    def open(self):
+        fds = self._open_streams()
         return FFMPEGMuxer(self.session, *fds, **self.options).open()
 
     @classmethod
@@ -56,78 +93,167 @@ class MuxedStream(Stream):
 
 
 class FFMPEGMuxer(StreamIO):
-    __commands__ = ['ffmpeg', 'ffmpeg.exe', 'avconv', 'avconv.exe']
+    __commands__: ClassVar[list[str]] = ["ffmpeg"]
+
+    DEFAULT_LOGLEVEL = "info"
+    DEFAULT_OUTPUT_FORMAT = "matroska"
+    DEFAULT_VIDEO_CODEC = "copy"
+    DEFAULT_AUDIO_CODEC = "copy"
+
+    FFMPEG_VERSION: str | None = None
+    FFMPEG_VERSION_TIMEOUT = 4.0
+
+    errorlog: int | TextIO
+
+    process: subprocess.Popen | None
+
+    @classmethod
+    def is_usable(cls, session):
+        return cls.command(session) is not None
+
+    @classmethod
+    def command(cls, session):
+        with _lock_resolve_command:
+            timeout = session.options.get("ffmpeg-validation-timeout") or cls.FFMPEG_VERSION_TIMEOUT
+            return cls._resolve_command(
+                session.options.get("ffmpeg-ffmpeg"),
+                not session.options.get("ffmpeg-no-validation"),
+                timeout,
+            )
+
+    @classmethod
+    @lru_cache(maxsize=128)
+    def _resolve_command(
+        cls,
+        command: str | None = None,
+        validate: bool = True,
+        timeout: float = FFMPEG_VERSION_TIMEOUT,
+    ) -> str | None:
+        if command:
+            resolved = which(command)
+        else:
+            resolved = None
+            for cmd in cls.__commands__:
+                resolved = which(cmd)
+                if resolved:
+                    break
+
+        if resolved and validate:
+            log.trace("Querying FFmpeg version: %r", [resolved, "-version"])
+            versionoutput = FFmpegVersionOutput([resolved, "-version"], timeout=timeout)
+            if not versionoutput.run():
+                log.error("Could not validate FFmpeg!")
+                log.error("Unexpected FFmpeg version output while running %r", [resolved, "-version"])
+                resolved = None
+            else:
+                cls.FFMPEG_VERSION = versionoutput.version
+                for i, line in enumerate(versionoutput.output):
+                    log.debug(f" {line}" if i > 0 else line)
+
+        if not resolved:
+            log.warning("No valid FFmpeg binary was found. See the --ffmpeg-ffmpeg option.")
+            log.warning("Muxing streams is unsupported! Only a subset of the available streams can be returned!")
+
+        return resolved
 
     @staticmethod
-    def copy_to_pipe(self, stream, pipe):
-        log.debug("Starting copy to pipe: {0}".format(pipe.path))
-        pipe.open("wb")
-        while not stream.closed:
+    def copy_to_pipe(muxer: FFMPEGMuxer, stream: StreamIO, pipe: NamedPipeBase):
+        log.debug(f"Starting copy to pipe: {pipe.path}")
+        # TODO: catch OSError when creating/opening pipe fails and close entire output stream
+        pipe.open()
+
+        data = b""
+        while True:
             try:
                 data = stream.read(8192)
-                if len(data):
-                    pipe.write(data)
-                else:
+            except (OSError, ValueError) as err:
+                log.error(f"Error while reading from substream: {err}")
+                break
+
+            if data == b"":
+                log.debug(f"Pipe copy complete: {pipe.path}")
+                break
+
+            try:
+                pipe.write(data)
+            except OSError as err:
+                if stream.closed or not muxer.process or not muxer.process.poll():
+                    log.debug(f"Pipe copy complete: {pipe.path}")
                     break
-            except IOError:
-                log.error("Pipe copy aborted: {0}".format(pipe.path))
-                return
-        try:
+                log.error(f"Error while writing to pipe {pipe.path}: {err}")
+                break
+
+        with suppress(OSError):
             pipe.close()
-        except IOError:  # might fail closing, but that should be ok for the pipe
-            pass
-        log.debug("Pipe copy complete: {0}".format(pipe.path))
 
     def __init__(self, session, *streams, **options):
-        if not self.is_usable(session):
-            raise StreamError("cannot use FFMPEG")
-
         self.session = session
         self.process = None
-        log = logging.getLogger("streamlink.stream.mp4mux-ffmpeg")
+        self.errorlog = subprocess.DEVNULL
+
+        if not self.is_usable(session):
+            raise StreamError("Cannot use FFmpeg")
+
         self.streams = streams
+        self.pipes = [NamedPipe() for _ in self.streams]
+        self.pipe_threads = [
+            threading.Thread(
+                target=self.copy_to_pipe,
+                args=(self, stream, np),
+            )
+            for stream, np in zip(self.streams, self.pipes, strict=True)
+        ]
 
-        self.pipes = [NamedPipe("ffmpeg-{0}-{1}".format(os.getpid(), random.randint(0, 1000))) for _ in self.streams]
-        self.pipe_threads = [threading.Thread(target=self.copy_to_pipe, args=(self, stream, np))
-                             for stream, np in
-                             zip(self.streams, self.pipes)]
-
-        ofmt = options.pop("format", "matroska")
+        loglevel = session.options.get("ffmpeg-loglevel") or options.pop("loglevel", self.DEFAULT_LOGLEVEL)
+        ofmt = session.options.get("ffmpeg-fout") or options.pop("format", self.DEFAULT_OUTPUT_FORMAT)
         outpath = options.pop("outpath", "pipe:1")
-        videocodec = session.options.get("ffmpeg-video-transcode") or options.pop("vcodec", "copy")
-        audiocodec = session.options.get("ffmpeg-audio-transcode") or options.pop("acodec", "copy")
+        videocodec = session.options.get("ffmpeg-video-transcode") or options.pop("vcodec", self.DEFAULT_VIDEO_CODEC)
+        audiocodec = session.options.get("ffmpeg-audio-transcode") or options.pop("acodec", self.DEFAULT_AUDIO_CODEC)
         metadata = options.pop("metadata", {})
         maps = options.pop("maps", [])
-        copyts = options.pop("copyts", False)
+        itsoffset = options.get("itsoffset", [])
+        copyts = session.options.get("ffmpeg-copyts") or options.pop("copyts", False)
+        start_at_zero = session.options.get("ffmpeg-start-at-zero") or options.pop("start_at_zero", False)
 
-        self._cmd = [self.command(session), '-nostats', '-y']
-        for np in self.pipes:
-            self._cmd.extend(["-i", np.path])
+        self._cmd = [
+            self.command(session),
+            "-y",
+            "-nostats",
+            "-loglevel",
+            loglevel,
+        ]
 
-        self._cmd.extend(['-c:v', videocodec])
-        self._cmd.extend(['-c:a', audiocodec])
+        for np, itsoffset_item in zip_longest(self.pipes, itsoffset, fillvalue=None):
+            if np is None:
+                break
+            # align tracks by provided PTS
+            if itsoffset_item is not None:
+                self._cmd.extend(["-itsoffset", f"{itsoffset_item}"])
+            self._cmd.extend(["-i", str(np.path)])
+
+        self._cmd.extend(["-c:v", videocodec])
+        self._cmd.extend(["-c:a", audiocodec])
 
         for m in maps:
             self._cmd.extend(["-map", str(m)])
 
         if copyts:
             self._cmd.extend(["-copyts"])
+            if start_at_zero:
+                self._cmd.extend(["-start_at_zero"])
 
         for stream, data in metadata.items():
             for datum in data:
-                self._cmd.extend(["-metadata:{0}".format(stream), datum])
+                stream_id = f":{stream}" if stream else ""
+                self._cmd.extend([f"-metadata{stream_id}", datum])
 
-        self._cmd.extend(['-f', ofmt, outpath])
-        log.debug("ffmpeg command: {0}".format(' '.join(self._cmd)))
-        self.close_errorlog = False
+        self._cmd.extend(["-f", ofmt, outpath])
+        log.debug("ffmpeg command: %r", self._cmd)
 
-        if session.options.get("ffmpeg-verbose"):
+        if session.options.get("ffmpeg-verbose-path"):
+            self.errorlog = Path(session.options.get("ffmpeg-verbose-path")).expanduser().open("w")
+        elif session.options.get("ffmpeg-verbose"):
             self.errorlog = sys.stderr
-        elif session.options.get("ffmpeg-verbose-path"):
-            self.errorlog = open(session.options.get("ffmpeg-verbose-path"), "w")
-            self.close_errorlog = True
-        else:
-            self.errorlog = devnull()
 
     def open(self):
         for t in self.pipe_threads:
@@ -137,36 +263,68 @@ class FFMPEGMuxer(StreamIO):
 
         return self
 
-    @classmethod
-    def is_usable(cls, session):
-        return cls.command(session) is not None
-
-    @classmethod
-    def command(cls, session):
-        command = []
-        if session.options.get("ffmpeg-ffmpeg"):
-            command.append(session.options.get("ffmpeg-ffmpeg"))
-        for cmd in command or cls.__commands__:
-            if which(cmd):
-                return cmd
-
     def read(self, size=-1):
-        data = self.process.stdout.read(size)
-        return data
+        return self.process.stdout.read(size)  # type: ignore[attr-defined, ty:unresolved-attribute]
 
     def close(self):
+        if self.closed:
+            return
+
         log.debug("Closing ffmpeg thread")
         if self.process:
             # kill ffmpeg
             self.process.kill()
-            self.process.stdout.close()
+            self.process.stdout.close()  # type: ignore[attr-defined, ty:unresolved-attribute]
 
-            # close the streams
-            for stream in self.streams:
-                if hasattr(stream, "close"):
-                    stream.close()
+            executor = concurrent.futures.ThreadPoolExecutor()
 
+            # close the substreams
+            futures = [
+                executor.submit(stream.close)
+                for stream in self.streams
+                if hasattr(stream, "close") and callable(stream.close)
+            ]  # fmt: skip
+            concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
             log.debug("Closed all the substreams")
-        if self.close_errorlog:
-            self.errorlog.close()
-            self.errorlog = None
+
+            # wait for substream copy-to-pipe threads to terminate and clean up the opened pipes
+            timeout = self.session.options.get("stream-timeout")
+            futures = [
+                executor.submit(thread.join, timeout=timeout)
+                for thread in self.pipe_threads
+            ]  # fmt: skip
+            concurrent.futures.wait(futures, return_when=concurrent.futures.ALL_COMPLETED)
+
+        if self.errorlog is not sys.stderr and not isinstance(self.errorlog, int):
+            with suppress(OSError):
+                self.errorlog.close()
+
+        super().close()
+
+
+class FFmpegVersionOutput(ProcessOutput):
+    # The version output format of the fftools hasn't been changed since n0.7.1 (2011-04-23):
+    # https://github.com/FFmpeg/FFmpeg/blame/n5.1.1/fftools/ffmpeg.c#L110
+    # https://github.com/FFmpeg/FFmpeg/blame/n5.1.1/fftools/opt_common.c#L201
+    # https://github.com/FFmpeg/FFmpeg/blame/c99b93c5d53d8f4a4f1fafc90f3dfc51467ee02e/fftools/cmdutils.c#L1156
+    # https://github.com/FFmpeg/FFmpeg/commit/89b503b55f2b2713f1c3cc8981102c1a7b663281
+    _re_version = re.compile(r"ffmpeg version (?P<version>\S+)")
+
+    def __init__(self, *args, **kwargs) -> None:
+        super().__init__(*args, **kwargs)
+        self.version: str | None = None
+        self.output: list[str] = []
+
+    def onexit(self, code: int) -> bool:
+        return code == 0 and self.version is not None
+
+    def onstdout(self, idx: int, line: str) -> bool | None:
+        # only validate the very first line of the stdout stream
+        if idx == 0:
+            match = self._re_version.match(line)
+            # abort if the very first line of stdout doesn't match the expected format
+            if not match:
+                return False
+            self.version = match["version"]
+
+        self.output.append(line)

@@ -1,83 +1,80 @@
-import inspect
+from __future__ import annotations
 
-import requests
+from typing import TYPE_CHECKING
 
-from .stream import Stream
-from .wrappers import StreamIOThreadWrapper, StreamIOIterWrapper
-from ..exceptions import StreamError
-
-
-def normalize_key(keyval):
-    key, val = keyval
-    key = hasattr(key, "decode") and key.decode("utf8", "ignore") or key
-
-    return key, val
+from streamlink.exceptions import StreamError
+from streamlink.stream.stream import Stream
+from streamlink.stream.wrappers import StreamIOIterWrapper, StreamIOThreadWrapper
 
 
-def valid_args(args):
-    argspec = inspect.getargspec(requests.Request.__init__)
-
-    return dict(filter(lambda kv: kv[0] in argspec.args, args.items()))
+if TYPE_CHECKING:
+    from streamlink.session import Streamlink
 
 
 class HTTPStream(Stream):
-    """A HTTP stream using the requests library.
-
-    *Attributes:*
-
-    - :attr:`url`  The URL to the stream, prepared by requests.
-    - :attr:`args` A :class:`dict` containing keyword arguments passed
-      to :meth:`requests.request`, such as headers and cookies.
-
+    """
+    An HTTP stream using the :mod:`requests` library.
     """
 
     __shortname__ = "http"
 
-    def __init__(self, session_, url, buffered=True, **args):
-        Stream.__init__(self, session_)
+    args: dict
+    """A dict of keyword arguments passed to :meth:`requests.Session.request`, such as method, headers, cookies, etc."""
 
-        self.args = dict(url=url, **args)
+    def __init__(
+        self,
+        session: Streamlink,
+        url: str,
+        buffered: bool = True,
+        **kwargs,
+    ):
+        """
+        :param session: Streamlink session instance
+        :param url: The URL of the HTTP stream
+        :param buffered: Wrap stream output in an additional reader-thread
+        :param kwargs: Additional keyword arguments passed to :meth:`requests.Session.request`
+        """
+
+        super().__init__(session)
+        self.args = self.session.http.valid_request_args(**kwargs)
+        self.args["url"] = url
         self.buffered = buffered
 
-    def __repr__(self):
-        return "<HTTPStream({0!r})>".format(self.url)
+    def __json__(self):  # ruff: ignore[bad-dunder-method-name]
+        req = self.session.http.prepare_new_request(**self.args)
 
-    def __json__(self):
-        method = self.args.get("method", "GET")
-        req = requests.Request(method=method, **valid_args(self.args))
+        return dict(
+            type=self.shortname(),
+            method=req.method,
+            url=req.url,
+            headers=dict(req.headers),
+            body=req.body,
+        )
 
-        # prepare_request is only available in requests 2.0+
-        if hasattr(self.session.http, "prepare_request"):
-            req = self.session.http.prepare_request(req)
-        else:
-            req = req.prepare()
-
-        headers = dict(map(normalize_key, req.headers.items()))
-
-        return dict(type=type(self).shortname(), url=req.url,
-                    method=req.method, headers=headers,
-                    body=req.body)
+    def to_url(self):
+        return self.url
 
     @property
-    def url(self):
-        method = self.args.get("method", "GET")
-        return requests.Request(method=method,
-                                **valid_args(self.args)).prepare().url
+    def url(self) -> str:
+        """
+        The URL to the stream, prepared by :mod:`requests` with parameters read from :attr:`args`.
+        """
+
+        return self.session.http.prepare_new_request(**self.args).url  # type: ignore[return-value, ty:invalid-return-type]
 
     def open(self):
-        method = self.args.get("method", "GET")
-        timeout = self.session.options.get("http-timeout")
-        res = self.session.http.request(method=method,
-                                        stream=True,
-                                        exception=StreamError,
-                                        timeout=timeout,
-                                        **self.args)
+        reqargs = self.session.http.valid_request_args(**self.args)
+        reqargs.setdefault("method", "GET")
+        timeout = self.session.options.get("stream-timeout")
+        res = self.session.http.request(
+            stream=True,
+            exception=StreamError,
+            timeout=timeout,
+            **reqargs,
+        )
 
         fd = StreamIOIterWrapper(res.iter_content(8192))
         if self.buffered:
             fd = StreamIOThreadWrapper(self.session, fd, timeout=timeout)
 
         return fd
-
-    def to_url(self):
-        return self.url

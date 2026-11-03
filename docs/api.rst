@@ -1,84 +1,16 @@
-.. _api:
-
 API Reference
 =============
 
-.. module:: streamlink
+This is an incomplete reference of the relevant Streamlink APIs.
 
-This ia reference of all the available API methods in Streamlink.
+.. toctree::
 
-Streamlink
-------------
-
-.. autofunction:: streams
-
-
-Session
--------
-
-.. autoclass:: Streamlink
-    :members:
-
-
-Plugins
--------
-.. module:: streamlink.plugin
-.. autoclass:: Plugin
-    :members:
-
-.. module:: streamlink.options
-.. autoclass:: Arguments
-    :members:
-
-.. autoclass:: Argument
-    :members:
-
-    .. automethod:: __init__
-
-
-Streams
--------
-
-All streams inherit from the :class:`Stream` class.
-
-.. module:: streamlink.stream
-.. autoclass:: Stream
-    :members:
-
-
-.. _api-stream-subclasses:
-
-Stream subclasses
-^^^^^^^^^^^^^^^^^
-
-You are able to inspect the parameters used by each stream,
-different properties are available depending on stream type.
-
-.. autoclass:: AkamaiHDStream
-    :members:
-
-.. autoclass:: HDSStream
-    :members:
-
-.. autoclass:: HLSStream
-    :members:
-
-.. autoclass:: HTTPStream
-    :members:
-
-.. autoclass:: RTMPStream
-    :members:
-
-.. autoclass:: DASHStream
-    :members:
-
-
-Exceptions
-----------
-
-Streamlink has three types of exceptions:
-
-.. autoexception:: streamlink.StreamlinkError
-.. autoexception:: streamlink.PluginError
-.. autoexception:: streamlink.NoPluginError
-.. autoexception:: streamlink.StreamError
+    api/streamlink
+    api/session
+    api/plugin
+    api/options
+    api/cache
+    api/validate
+    api/stream
+    api/webbrowser
+    api/exceptions

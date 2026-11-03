@@ -1,14 +1,20 @@
-from ..exceptions import StreamError
-from streamlink.stream.stream import Stream
+# ruff: file-ignore[non-empty-init-module]
+from streamlink.compat import deprecated
 
-from streamlink.stream.akamaihd import AkamaiHDStream
-from streamlink.stream.hds import HDSStream
-from streamlink.stream.hls import HLSStream
-from streamlink.stream.http import HTTPStream
-from streamlink.stream.rtmpdump import RTMPStream
-from streamlink.stream.dash import DASHStream
-from streamlink.stream.streamprocess import StreamProcess
-from streamlink.stream.wrappers import StreamIOWrapper, StreamIOIterWrapper, StreamIOThreadWrapper
 
-from streamlink.stream.flvconcat import extract_flv_header_tags
-from streamlink.stream.playlist import Playlist, FLVPlaylist
+_msg = "Importing from the 'streamlink.stream' package has been deprecated. Import from its submodules instead."
+
+deprecated({
+    "DASHStream": ("streamlink.stream.dash.dash", None, _msg),
+    "MuxedStream": ("streamlink.stream.ffmpegmux", None, _msg),
+    "HLSStream": ("streamlink.stream.hls.hls", None, _msg),
+    "MuxedHLSStream": ("streamlink.stream.hls.hls", None, _msg),
+    "HTTPStream": ("streamlink.stream.http", None, _msg),
+    "Stream": ("streamlink.stream.stream", None, _msg),
+    "StreamIO": ("streamlink.stream.stream", None, _msg),
+    "StreamIOIterWrapper": ("streamlink.stream.wrappers", None, _msg),
+    "StreamIOThreadWrapper": ("streamlink.stream.wrappers", None, _msg),
+    "StreamIOWrapper": ("streamlink.stream.wrappers", None, _msg),
+})
+
+del _msg
